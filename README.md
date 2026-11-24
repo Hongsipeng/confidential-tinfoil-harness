@@ -24,7 +24,8 @@ Anonymous chat works only from a deployed harness, because Tinfoil validates `fr
 
 - `USAGE_CONTEXT_SECRET`: required secret for usage accounting
 - `TINFOIL_API_KEY`: secret for the safeguards sidecar, and for embedding chats and search queries and writing chat titles, reasoning labels and compaction summaries through the inference service
-- `TINFOIL_CONTROLPLANE_URL` and `CLERK_ISSUER`: required
+- `TINFOIL_CONTROLPLANE_URL` and an identity issuer: required. Existing deployments use `CLERK_ISSUER`.
+- For PlugOS clients, set `OAUTH_ISSUER=https://services.uat.plugos.cn/oauth2`, `OAUTH_JWKS_URL=https://services.uat.plugos.cn/oauth2/oauth2/jwks`, and `OAUTH_CLIENT_ID=tinfowebchat`. When `OAUTH_ISSUER` is set, the harness verifies the access token's signature, issuer, expiry, client ID, `tinfoil:chat` scope, and `user_uuid` instead of using `CLERK_ISSUER`. The control plane remains required to sign chat credentials and serve storage and quota APIs.
 - `TINFOIL_ROUTER_ENCLAVE`: required, must attest at boot, and serves every chat model turn
 - `TINFOIL_TOOLS_ENCLAVE`: the web search enclave, used once its attestation succeeds
 - `SYNC_ENCLAVE_SECRET`, `BUCKETS_URL`, `CHAT_ATTACHMENTS_BUCKET`, `SEARCH_BUCKETS_URL`, `SEARCH_INDEXES_BUCKET` and `EMBEDDING_MODEL`: required; the control plane's service secret for its storage API, the buckets sidecar that holds attachments and search indexes, and the model that embeds chats for search

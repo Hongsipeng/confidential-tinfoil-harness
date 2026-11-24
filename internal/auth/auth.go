@@ -164,6 +164,74 @@ func New(ctx context.Context, issuer, cp string, flags func(ctx context.Context,
 	return Configured(c), nil
 }
 
+// NewWithOAuth verifies PlugOS access tokens using its explicitly configured
+// JWKS endpoint. The issuer and JWKS URL are separate because PlugOS does not
+// publish its keys at issuer + "/.well-known/jwks.json".
+func NewWithOAuth(ctx context.Context, issuer, jwksURL, clientID, cp string, flags func(ctx context.Context, userID string) ([]string, error)) (*Authenticator, error) {
+	if !strings.HasPrefix(issuer, "https://") || !strings.HasPrefix(jwksURL, "https://") || clientID == "" {
+		return nil, errors.New("OAUTH_ISSUER, OAUTH_JWKS_URL and OAUTH_CLIENT_ID are required")
+	}
+	keys, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURL})
+	if err != nil {
+		return nil, err
+	}
+	chatKeys, err := keyfunc.NewDefaultCtx(ctx, []string{cp + "/.well-known/jwks.json"})
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{
+		Timeout:       15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return Configured(Config{
+		Verify:        OAuthSessionVerifier(strings.TrimRight(issuer, "/"), clientID, keys.KeyfuncCtx),
+		ChatKeys:      chatKeys.Keyfunc,
+		ChatIssuer:    cp,
+		Client:        client,
+		Controlplane: cp, Flags: flags,
+	}), nil
+}
+
+// OAuthSessionVerifier accepts only an access token issued to the web chat
+// client with its chat scope. The stable user_uuid is the same account ID the
+// browser uses for local storage and the chat credential binds to.
+func OAuthSessionVerifier(issuer, clientID string, keys func(context.Context) jwt.Keyfunc) func(context.Context, string) (string, error) {
+	options := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512"}),
+		jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithLeeway(30 * time.Second),
+	}
+	return func(ctx context.Context, token string) (string, error) {
+		claims := jwt.MapClaims{}
+		parsed, err := jwt.NewParser(options...).ParseWithClaims(token, claims, keys(ctx))
+		if err != nil || !parsed.Valid {
+			return "", errors.New("invalid OAuth access token")
+		}
+		if claims["client_id"] != clientID {
+			return "", errors.New("OAuth token belongs to another client")
+		}
+		allowed := false
+		switch scope := claims["scope"].(type) {
+		case string:
+			allowed = slices.Contains(strings.Fields(scope), "tinfoil:chat")
+		case []any:
+			for _, item := range scope {
+				if item == "tinfoil:chat" {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			return "", errors.New("OAuth token lacks chat scope")
+		}
+		id, ok := claims["user_uuid"].(string)
+		if !ok || id == "" {
+			return "", errors.New("OAuth token lacks user identity")
+		}
+		return id, nil
+	}
+}
+
 const (
 	// sessionLeeway is how long a Clerk session token is accepted after it
 	// expires. Clerk issues one for a minute, and a request that carries a

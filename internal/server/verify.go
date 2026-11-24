@@ -47,7 +47,13 @@ func (h *harness) bootChat(ctx context.Context, usageSecret string) error {
 		}
 	}
 	cp := controlplane.NewClient(h.controlplane, &http.Client{Timeout: controlplaneTimeout}, controlplane.WithServiceSecret(secret))
-	authenticator, err := auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane, cp.SafeguardFlags)
+	var authenticator *auth.Authenticator
+	var err error
+	if issuer := os.Getenv("OAUTH_ISSUER"); issuer != "" {
+		authenticator, err = auth.NewWithOAuth(ctx, issuer, os.Getenv("OAUTH_JWKS_URL"), os.Getenv("OAUTH_CLIENT_ID"), h.controlplane, cp.SafeguardFlags)
+	} else {
+		authenticator, err = auth.New(ctx, os.Getenv("CLERK_ISSUER"), h.controlplane, cp.SafeguardFlags)
+	}
 	if err != nil {
 		return err
 	}
