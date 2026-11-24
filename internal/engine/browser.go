@@ -30,16 +30,20 @@ const (
 
 // BrowserAccess binds a local turn to its browser executor. Token is private to
 // the executor; it is never included in model input, events, or stored chats.
+// BrowserAccess 将一个本地 turn 绑定到其浏览器执行器。Token 仅对执行器可见；
+// 它绝不会出现在模型输入、事件或已存储的聊天中。
 type BrowserAccess struct {
 	ExecutorID string `json:"executorId"`
 	Token      string `json:"token"`
 }
 
+// BrowserResult 是浏览器执行器返回的一次观察结果。
 type BrowserResult struct {
 	Text  string `json:"text"`
 	Image string `json:"image,omitempty"`
 }
 
+// BrowserResultRequest 提交一次浏览器执行的结果。
 type BrowserResultRequest struct {
 	RunRequest
 	BrowserAccess
@@ -47,6 +51,7 @@ type BrowserResultRequest struct {
 	Result      BrowserResult `json:"result"`
 }
 
+// Validate 校验浏览器结果请求的合法性。
 func (in *BrowserResultRequest) Validate() error {
 	if err := api.RequireID("executionId", in.ExecutionID); err != nil {
 		return err
@@ -129,6 +134,8 @@ func (b *browserSession) call(ctx context.Context, out *Stream, call ToolCall) (
 
 // SubmitBrowserResult accepts one result per execution, and acknowledges an
 // identical retry even after the next action started. It never repeats an action.
+// SubmitBrowserResult 每次执行只接受一个结果，并且即使下一个动作已开始，也会确认完全相同的重试。
+// 它绝不会重复执行一个动作。
 func (eng *Engine) SubmitBrowserResult(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *BrowserResultRequest) (any, error) {
 	r, err := eng.authorizedRun(p, auth.ContentKey{}, in.ThreadID, in.RunID)
 	if err != nil {

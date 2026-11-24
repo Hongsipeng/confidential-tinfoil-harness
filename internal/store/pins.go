@@ -1,3 +1,4 @@
+// Package store 管理加密的收藏（pin）索引。
 package store
 
 import (
@@ -9,6 +10,7 @@ import (
 )
 
 // PinnedIDs is the encrypted favorites index, independent of chat pagination.
+// PinnedIDs 是加密的收藏索引，独立于 chat 分页。
 func (s *Store) PinnedIDs(ctx context.Context, p *auth.Principal, key auth.ContentKey) ([]string, error) {
 	profile, err := s.LoadProfile(ctx, p, key)
 	if err != nil || profile == nil {
@@ -17,6 +19,7 @@ func (s *Store) PinnedIDs(ctx context.Context, p *auth.Principal, key auth.Conte
 	return profile.PinnedChatIDs, nil
 }
 
+// ApplyPins 根据收藏索引为每行 chat 标记是否已置顶（pinned）。
 func (s *Store) ApplyPins(ctx context.Context, p *auth.Principal, key auth.ContentKey, rows []*domain.ThreadRow) error {
 	pins, err := s.PinnedIDs(ctx, p, key)
 	if err != nil {
@@ -32,6 +35,7 @@ func (s *Store) ApplyPins(ctx context.Context, p *auth.Principal, key auth.Conte
 
 // SetPin updates the encrypted favorites index so favorites can be fetched
 // without reading every page of chat history.
+// SetPin 更新加密的收藏索引，从而无需读取每一页 chat 历史即可获取收藏。
 func (s *Store) SetPin(ctx context.Context, p *auth.Principal, key auth.ContentKey, id string, pinned bool) error {
 	_, err := s.MutateProfile(ctx, p, key, func(profile *domain.StoredProfile) error {
 		profile.PinnedChatIDs = slices.DeleteFunc(profile.PinnedChatIDs, func(pin string) bool { return pin == id })

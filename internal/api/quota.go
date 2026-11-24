@@ -7,6 +7,7 @@ type tokenBudget struct {
 }
 
 // Only free keys count requests; a subscriber's hourly cap is in tokens.
+// 只有免费密钥按请求数计费；订阅用户的每小时额度以 token 计。
 type RateLimit struct {
 	Kind         any          `json:"kind"`
 	MaxRequests  *int         `json:"maxRequests,omitempty"`
@@ -16,14 +17,17 @@ type RateLimit struct {
 	ResetsAt     string       `json:"resetsAt,omitempty"`
 }
 
+// Exhausted 报告剩余请求数是否已用尽。
 func (l RateLimit) Exhausted() bool { return l.Remaining != nil && *l.Remaining <= 0 }
 
+// ExhaustedLimit 返回一个剩余请求数为零的 RateLimit。
 func ExhaustedLimit(kind string) RateLimit {
 	return RateLimit{Kind: kind, MaxRequests: new(0), Remaining: new(0)}
 }
 
 // Quota is the rate_limit object both credential exchanges answer with. A
 // missing or zero maximum leaves that dimension unlimited.
+// Quota 是两种凭据交换都会返回的 rate_limit 对象。上限缺失或为零，表示该维度不设限。
 type Quota struct {
 	MaxRequests     *int   `json:"max_requests"`
 	Remaining       *int   `json:"remaining"`
@@ -36,6 +40,7 @@ type Quota struct {
 	ResetsAt        string `json:"resets_at"`
 }
 
+// Limit 将 Quota 映射为按 kind 标识的 RateLimit。
 func (q Quota) Limit(kind string) RateLimit {
 	l := RateLimit{Kind: kind, InputTokens: budget(q.MaxInput, q.InputUsed, q.InputRemaining), OutputTokens: budget(q.MaxOutput, q.OutputUsed, q.OutputRemaining), ResetsAt: q.ResetsAt}
 	if q.MaxRequests != nil && *q.MaxRequests > 0 && q.Remaining != nil {
@@ -52,6 +57,7 @@ func budget(limit, used, remaining *int) *tokenBudget {
 }
 
 // debited is the quota after a run's request and the tokens it spent.
+// debited 表示扣除一次 run 的请求及其所消耗 token 之后的 quota。
 func (l RateLimit) Debited(spent Usage) RateLimit {
 	if l.Remaining != nil {
 		l.Remaining = new(max(0, *l.Remaining-1))
@@ -62,6 +68,7 @@ func (l RateLimit) Debited(spent Usage) RateLimit {
 }
 
 // none is the quota with no request left.
+// none 表示剩余请求数为零的 quota。
 func (l RateLimit) None() RateLimit {
 	if l.MaxRequests == nil {
 		l.MaxRequests = new(0)
@@ -71,6 +78,7 @@ func (l RateLimit) None() RateLimit {
 }
 
 // spend is a token budget after tokens are spent from it.
+// spend 返回扣除 tokens 之后的 token 预算。
 func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 	if b == nil {
 		return nil
@@ -78,6 +86,7 @@ func (b *tokenBudget) spend(tokens int64) *tokenBudget {
 	return &tokenBudget{Max: b.Max, Used: b.Used + int(tokens), Remaining: max(0, b.Remaining-int(tokens))}
 }
 
+// Usage 是一次模型调用的 token 用量。
 type Usage struct {
 	Prompt     int64 `json:"prompt_tokens"`
 	Completion int64 `json:"completion_tokens"`

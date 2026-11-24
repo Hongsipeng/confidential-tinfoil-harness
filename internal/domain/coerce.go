@@ -1,3 +1,4 @@
+// 本文件将模型发送的工具参数强制转换为工具发布模式声明的类型。
 package domain
 
 import (
@@ -17,11 +18,17 @@ import (
 // CoerceArgumentsToSchema converts such values before the call leaves, but
 // only when the result clearly satisfies the schema; anything else is left for
 // the enclave to reject. Ported from the model router (toolruntime/coerce.go).
+// 模型经常发送与工具发布模式 JSON 类型不一致的工具参数（Llama 会把每个数字都转成字符串），
+// 而 enclave 的校验器随后会以模型无法处理的错误拒绝该调用。CoerceArgumentsToSchema 会在
+// 调用离开前转换这类值，但仅限于结果明确满足模式的情况；其余仍留给 enclave 拒绝。
+// 移植自模型 router（toolruntime/coerce.go）。
 
 // coerceMaxIntFromFloat keeps "1e100" from saturating into an int64.
+// coerceMaxIntFromFloat 防止 "1e100" 溢出成 int64。
 const coerceMaxIntFromFloat = float64(1 << 53)
 
 // SchemaLookup parses each published InputSchema by tool name, omitting any that do not parse.
+// SchemaLookup 按工具名解析每个已发布的 InputSchema，跳过无法解析的那些。
 func SchemaLookup(tools []*mcp.Tool) map[string]*jsonschema.Schema {
 	if len(tools) == 0 {
 		return nil
@@ -58,6 +65,8 @@ func parseInputSchema(raw any) (*jsonschema.Schema, error) {
 
 // CoerceArgumentsToSchema rewrites arguments in place so each field matches its
 // declared type, leaving any field whose coerced value would break the schema.
+// CoerceArgumentsToSchema 原地改写参数，使每个字段符合其声明类型；任何强制转换后会破坏
+// 模式的字段保持原样。
 func CoerceArgumentsToSchema(toolName string, arguments map[string]any, schemas map[string]*jsonschema.Schema) {
 	if len(arguments) == 0 || len(schemas) == 0 {
 		return
@@ -81,6 +90,7 @@ func coerceObject(obj map[string]any, schema *jsonschema.Schema) {
 }
 
 // propertySchema finds a property's schema directly or through allOf, anyOf and oneOf.
+// propertySchema 直接或通过 allOf、anyOf 与 oneOf 查找某个属性的模式。
 func propertySchema(parent *jsonschema.Schema, key string) *jsonschema.Schema {
 	if parent == nil {
 		return nil
@@ -119,6 +129,8 @@ func declaredTypes(schema *jsonschema.Schema) []string {
 // coerceValue returns value converted to the schema's declared type, and
 // whether it was converted. Values that already match, or whose conversion
 // would violate enum or range constraints, come back unchanged.
+// coerceValue 返回转换为模式声明类型的值，以及是否发生了转换。已匹配的值、或转换后会违反
+// enum 或范围约束的值，将原样返回。
 func coerceValue(value any, schema *jsonschema.Schema) (any, bool) {
 	if schema == nil {
 		return value, false
@@ -154,6 +166,7 @@ func coerceValue(value any, schema *jsonschema.Schema) (any, bool) {
 }
 
 // descendIntoContainers still coerces the leaves of a correctly typed container.
+// descendIntoContainers 仍会强制转换类型正确的容器的叶子节点。
 func descendIntoContainers(value any, schema *jsonschema.Schema) (any, bool) {
 	switch v := value.(type) {
 	case map[string]any:
@@ -218,6 +231,8 @@ func isNumericValue(value any) bool {
 
 // isIntegerValue excludes whole floats, so 5.0 still becomes an int64 for
 // validators that check the Go type rather than the value.
+// isIntegerValue 排除整数浮点，这样 5.0 仍会转成 int64，以满足那些检查 Go 类型而非
+// 值的校验器。
 func isIntegerValue(value any) bool {
 	switch v := value.(type) {
 	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
@@ -261,6 +276,7 @@ func coerceToInteger(value any, schema *jsonschema.Schema) (int64, bool) {
 }
 
 // floatToBoundedInt64 accepts only finite whole numbers within coerceMaxIntFromFloat.
+// floatToBoundedInt64 只接受 coerceMaxIntFromFloat 范围内的有限整数。
 func floatToBoundedInt64(f float64) (int64, bool) {
 	if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f || math.Abs(f) > coerceMaxIntFromFloat {
 		return 0, false
@@ -323,6 +339,7 @@ func coerceToString(value any) (string, bool) {
 }
 
 // coerceToArray accepts a JSON array literal or a comma-separated list.
+// coerceToArray 接受 JSON 数组字面量或以逗号分隔的列表。
 func coerceToArray(value any, schema *jsonschema.Schema) ([]any, bool) {
 	switch v := value.(type) {
 	case []any:
@@ -391,6 +408,7 @@ func numberSatisfiesSchema(f float64, schema *jsonschema.Schema) bool {
 }
 
 // enumContainsNumeric is true without an enum, or when one entry equals candidate.
+// enumContainsNumeric 在没有 enum 时为 true，或在某一项等于候选值时也为 true。
 func enumContainsNumeric(enum []any, candidate float64) bool {
 	if len(enum) == 0 {
 		return true
@@ -429,12 +447,14 @@ func splitCSV(s string) []string {
 }
 
 // looksLikeCSV keeps a single token such as "python.org" from becoming an array.
+// looksLikeCSV 避免像 "python.org" 这样的单个 token 被当成数组。
 func looksLikeCSV(s string) bool {
 	return strings.Contains(s, ",") && len(splitCSV(s)) >= 2
 }
 
 // HumanizeToolArgError turns a validator error into one sentence naming the
 // field, which a model can correct on its next turn.
+// HumanizeToolArgError 把校验器错误转换为一句指明字段的话，模型可在下一 turn 据此修正。
 func HumanizeToolArgError(toolName string, err error, arguments map[string]any) string {
 	if err == nil {
 		return ""
@@ -450,6 +470,8 @@ func HumanizeToolArgError(toolName string, err error, arguments map[string]any) 
 
 // extractValidatorSummary reads jsonschema-go's
 // `validating /properties/<field>: type: X has type "Y", want "Z"`.
+// extractValidatorSummary 读取 jsonschema-go 的错误信息
+// `validating /properties/<field>: type: X has type "Y", want "Z"`。
 func extractValidatorSummary(raw string) string {
 	fieldIdx := strings.Index(raw, "/properties/")
 	if fieldIdx == -1 {

@@ -30,59 +30,86 @@ import (
 // client draws it, followed by a reply with what it found, or else as the
 // reply's only text. A caller may start one research an hour, counted from
 // when it first searches, so a run that only asks questions does not count.
+// research turn 在回答之前会先在网页上对其问题进行深入研究。它的第一个模型 turn 可能会改用
+// questions widget 询问用户它需要知道什么，这会结束该 run，一旦用户回答，研究就开始。
+// 否则模型会先制定计划，然后在 researchTurns 与 researchTime 的限制内搜索和阅读若干个 turn；
+// 它在调用之间写下的内容会显示为其思考。当它读到的东西超出窗口时，harness 会将其折叠成笔记，
+// 就像 compaction 折叠聊天那样，模型再从这些笔记继续。一旦它停止调用工具，会先被要求一次
+// 对照请求检查其发现，然后撰写报告，并引用它所阅读的页面：当客户端绘制 artifact widget 时
+// 写在其中，随后是一条给出发现的回复；否则就作为回复的唯一文本。调用方每小时可发起一次研究，
+// 从其首次搜索算起，因此只提问而不搜索的 run 不计入。
 
 const (
 	// researchVersion is the version of the instructions a research runs
 	// under, which its reply records.
+	// researchVersion 是 research 运行所依据的指令版本，其回复会记录它。
 	researchVersion = 2
 	// researchTurns bounds the model turns a research takes before it
 	// writes its report.
+	// researchTurns 限制 research 在撰写报告之前所进行的模型 turn 数量。
 	researchTurns = 40
 	// researchTime is how long a research searches and reads before it
 	// writes its report, and researchReportTime how long it then has to
 	// write it.
+	// researchTime 是 research 在撰写报告之前搜索和阅读的时长，researchReportTime
+	// 是它随后撰写报告所拥有的时长。
 	researchTime       = 20 * time.Minute
 	researchReportTime = 10 * time.Minute
 	// reportTurns bounds the turns a research is offered the artifact
 	// widget to write its report in, which leaves the model one more try
 	// when the widget refuses its arguments.
+	// reportTurns 限制向 research 提供 artifact widget 以撰写报告的 turn 数量，
+	// 当 widget 拒绝其参数时，这会留给模型再一次尝试的机会。
 	reportTurns = 2
 )
 
 const (
 	// researchInstructions close a research's system prompt in place of
 	// the web search instructions.
+	// researchInstructions 在 research 的 system prompt 结尾替代 web 搜索指令。
 	researchInstructions = "You are carrying out a deep research for the user with the web_search and web_fetch tools, and will write a report once it is done. Research thoroughly: work out the parts of the question that need answering, search for each with several differently worded queries, and read the most relevant and authoritative pages in full with web_fetch, preferring primary sources such as official documents, filings, papers, datasets and first-hand reporting over summaries of them. Call several tools at once when their queries do not depend on each other. Follow promising leads, check important claims against more than one independent source, look for evidence against what you found, and note when sources disagree or are out of date. What you write between your tool calls is shown to the user as your thinking, not as your answer: keep it to brief notes on what you found and what you will look for next. Stop calling tools once every part of the question is covered or more searching is unlikely to change the answer; you will then be asked to write the report. " + ToolOutputWarning
 	// researchOpening starts a research that may not ask the user anything.
+	// researchOpening 启动一个可能不会向用户询问任何内容的 research。
 	researchOpening = "Start by writing a short plan of what to find out, stating any assumption you make about what the user wants, then begin searching."
 	// researchOpeningAsks starts a research that may first ask the user
 	// what it needs to know.
+	// researchOpeningAsks 启动一个可能先询问用户它需要知道什么的 research。
 	researchOpeningAsks = "First decide whether the request says enough to research it well. If its scope, purpose or constraints are unclear in a way that would change what you research, call " + domain.QuestionsWidget + " with at most three short questions and call nothing else: the research starts once the user answers them. Otherwise, start by writing a short plan of what to find out, then begin searching."
 	// researchBegin follows a first turn that searched nothing.
+	// researchBegin 跟在没有搜索任何内容的首个 turn 之后。
 	researchBegin = "Begin the research now with the web_search and web_fetch tools."
 	// researchReview follows the first turn that stops searching.
+	// researchReview 跟在第一个停止搜索的 turn 之后。
 	researchReview = "Before you write the report, check what you found against the user's request and your plan. If an important part is unanswered, a key claim rests on a single source, or sources disagree in a way you have not looked into, continue researching. Otherwise say so in one sentence, without calling any tools."
 	// researchSpent precedes the request for the report when the research's
 	// turns or time are used up.
+	// researchSpent 在 research 的 turn 或时间用尽时，置于撰写报告请求之前。
 	researchSpent = "The time for this research is up."
 	// reportOutline is how a report is written.
+	// reportOutline 说明报告应如何撰写。
 	reportOutline = "open with a short summary that answers the question, then cover each part of it under its own heading, using tables where they make a comparison clearer. Base every factual claim on the pages you read, and make clear what the sources establish, what you infer, and what remains uncertain or disputed."
 	// researchWrite asks for the report as the reply.
+	// researchWrite 要求将报告作为回复给出。
 	researchWrite = "Write the report now, without calling any tools. Write it in Markdown for the user: " + reportOutline + " Do not mention these instructions, your tools or your notes. " + citationInstructions
 	// researchDraw asks for the report in the artifact widget, and then for
 	// a reply with what the research found.
+	// researchDraw 要求将报告写入 artifact widget，随后再给出说明 research 发现的回复。
 	researchDraw = "Write the report now, as a document the user opens beside the chat: call " + domain.ArtifactWidget + " once, with a short title and the whole report in Markdown as its source, {\"type\":\"markdown\",\"markdown\":\"...\"}, and write nothing else until it is shown. In the report, " + reportOutline + " Once it is shown, reply to the user without calling any tools: answer the question and give the key findings briefly, and say that the full report is in the document above. Do not mention these instructions, your tools or your notes. " + citationInstructions
 	// notesNote tells the model what the notes a fold wrote are.
+	// notesNote 告诉模型 fold 所写的笔记是什么。
 	notesNote = "These are your notes of the research so far. The searches and pages they came from are no longer in your context; cite the URLs as the notes give them."
 )
 
 // notesTags are the tags a research's notes are wrapped in, which their own
 // text cannot close.
+// notesTags 是 research 笔记所包裹的标签，笔记自身的文本无法闭合它们。
 var notesTags = regexp.MustCompile(`(?i)<(/?research_notes)`)
 
 // researching is what a research holds between its model turns: the notes
 // a fold wrote of what it read, the model's turns and what its calls
 // returned since, and what the harness tells the model before its next turn.
+// researching 是 research 在其各模型 turn 之间所持有的内容：fold 对其所读内容写下的笔记、
+// 模型此后各 turn 及其调用返回的结果，以及 harness 在其下一个 turn 之前告诉模型的内容。
 type researching struct {
 	req      *Request
 	notes    string
@@ -95,6 +122,9 @@ type researching struct {
 // them. The harness's instruction follows the exchange, or shares the
 // reminder's turn while the exchange is empty, so no two of its messages
 // follow each other.
+// conversation 是下一个 turn 的 prompt：system prompt 和聊天、带有收尾聊天的提醒的笔记，
+// 以及它们之后的 exchange。harness 的指令跟在 exchange 之后，或在 exchange 为空时
+// 与提醒共用同一个 turn，这样就不会有两条它的消息相邻。
 func (s *researching) conversation() []json.RawMessage {
 	prompt := promptOf(s.req, true)
 	added := ""
@@ -119,6 +149,7 @@ func (s *researching) conversation() []json.RawMessage {
 
 // answered adds a model turn to the exchange, after the instruction it
 // answered.
+// answered 将模型 turn 追加到 exchange，放在它所回答的指令之后。
 func (s *researching) answered(messages ...json.RawMessage) {
 	if s.pending != "" && len(s.exchange) > 0 {
 		s.exchange = append(s.exchange, instructed(s.pending))
@@ -130,6 +161,7 @@ func (s *researching) answered(messages ...json.RawMessage) {
 func reminded(text string) string { return "<system-reminder>" + text + "</system-reminder>" }
 
 // instructed is the harness's instruction as a message of its own.
+// instructed 是 harness 的指令，作为一条独立的消息。
 func instructed(text string) json.RawMessage {
 	return api.Raw(api.Object{"role": "user", "content": reminded(text)})
 }
@@ -143,6 +175,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 	}
 	defer set.close()
 	// The artifact is drawn only once the report is asked for.
+	// artifact 只有在要求撰写报告时才会被绘制。
 	set.Widgets, set.Local = map[string]domain.Widget{}, eng.widgetResult
 	var asking []json.RawMessage
 	var artifact *domain.Widget
@@ -212,6 +245,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 				return call.Name == artifact.Name && domain.WidgetFailure(*artifact, call.Args) == nil
 			})
 			// A report the artifact never showed is written as the reply.
+			// artifact 从未展示的报告会作为回复写出。
 			if !drawn && drafts == reportTurns {
 				s.pending = researchWrite
 			}
@@ -219,6 +253,7 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 		}
 		// Only the report ends the reply: a research turn cut off at the
 		// end of the window goes on as one that stopped calling tools.
+		// 只有报告才会结束回复：在窗口末尾被截断的 research turn 会作为停止调用工具的 turn 继续。
 		out.mu.Lock()
 		out.truncated = false
 		out.mu.Unlock()
@@ -256,6 +291,9 @@ func (eng *Engine) research(ctx context.Context, r *Run, req *Request, m *infere
 // the research read into its notes, or clears the results the model already
 // answered when no notes can be written, and then compacts the chat before
 // the research, once a run, when that is not enough.
+// makeRoom 让 research 的下一个 turn 能放入窗口：它将 research 读到的东西折叠进笔记，
+// 或在无法写笔记时清除模型已回答的结果，然后（当这些还不够时）在 research 之前对聊天做
+// compaction，每个 run 一次。
 func (eng *Engine) makeRoom(c *runCaller, s *researching, tools json.RawMessage) error {
 	if fits(s.req, s.conversation(), tools) {
 		return nil
@@ -287,6 +325,7 @@ func (eng *Engine) makeRoom(c *runCaller, s *researching, tools json.RawMessage)
 }
 
 // fold writes what a research read since its notes into them.
+// fold 将 research 自上次笔记以来所读到的内容写入笔记。
 func (eng *Engine) fold(ctx context.Context, notes string, exchange []json.RawMessage) (string, error) {
 	if !eng.Summaries.Ready(summarize.ResearchNotes) {
 		return "", summarize.ErrUnavailable
@@ -299,6 +338,9 @@ func (eng *Engine) fold(ctx context.Context, notes string, exchange []json.RawMe
 // wrote between its calls, and what each of its searches and page reads
 // returned, as the model read it. The harness's instructions are left out,
 // and so is a result already cleared.
+// readings 是 fold 从 research 的 exchange 中读取的内容：模型在调用之间写下的文字，
+// 以及它每次搜索和页面读取返回的内容（即模型所读到的）。harness 的指令会被略去，
+// 已被清除的结果也一样。
 func readings(exchange []json.RawMessage) []summarize.Document {
 	called := map[string]toolCallJSON{}
 	var docs []summarize.Document
@@ -343,6 +385,8 @@ func readings(exchange []json.RawMessage) []summarize.Document {
 // asksFirst reports whether a research of a chat's last question may first
 // ask the user what it needs to know: not when the question answers
 // questions, nor when the reply before it asked some.
+// asksFirst 报告聊天最后一个问题的 research 是否可以先询问用户它需要知道什么：
+// 当该问题是在回答问题时不能，当其之前的回复已经问过一些问题时也不能。
 func asksFirst(messages []domain.Message) bool {
 	question := lastQuestion(messages)
 	if question < 0 || len(messages[question].Answers) > 0 {
@@ -363,6 +407,8 @@ func isQuestions(b domain.Block) bool {
 // reportBlock reports whether a block of a research's reply is part of its
 // report, which the model reads back: its text, and the artifact it may have
 // written the report in.
+// reportBlock 报告 research 回复中的某个 block 是否属于其报告（模型会读回报告）：
+// 其文本，以及可能写有报告的 artifact。
 func reportBlock(b domain.Block) bool {
 	return b.Type == "content" || b.Type == "tool_call" && b.Name == domain.ArtifactWidget
 }
@@ -370,12 +416,17 @@ func reportBlock(b domain.Block) bool {
 // answersAnew are the turns, as carried out, that answer a question anew,
 // which a research may answer. A continuation goes on with the reply it
 // extends.
+// answersAnew 是实际执行时重新回答一个问题的那些 turn，research 可以回答这些 turn。
+// continue 则继续它所延伸的回复。
 var answersAnew = []string{"send", "edit", "regenerate", "answer"}
 
 // markResearch marks the question a turn answers as one that asks for deep
 // research: when the turn asks for it, and when the question follows the
 // questions a research asked first, which answering them continues. An edit,
 // regeneration or retry of a marked question researches it again.
+// markResearch 将一个 turn 所回答的问题标记为请求深入研究的问题：当该 turn 明确要求时，
+// 以及当该问题跟在 research 先提出的问题之后（回答它们即继续）时。对已标记问题的 edit、
+// regenerate 或 retry 会再次对它做研究。
 func markResearch(t *domain.Thread, turn *TurnRequest) {
 	question := lastQuestion(t.Messages)
 	if !slices.Contains(answersAnew, turn.Kind) || question < 0 {
@@ -388,6 +439,7 @@ func markResearch(t *domain.Thread, turn *TurnRequest) {
 
 // researches reports whether a turn of a chat researches: whether it answers
 // anew a question that asks for deep research.
+// researches 报告聊天的一个 turn 是否做研究：即它是否重新回答一个请求深入研究的问题。
 func researches(t *domain.Thread, kind string) bool {
 	question := lastQuestion(t.Messages)
 	return slices.Contains(answersAnew, kind) && question >= 0 && t.Messages[question].Research != nil
@@ -396,6 +448,8 @@ func researches(t *domain.Thread, kind string) bool {
 // askedFirst reports whether messages end with the questions a research
 // asked first: a reply to a question that asks for deep research, which
 // called the questions widget and wrote no report.
+// askedFirst 报告 messages 是否以 research 先提出的问题结尾：即对一个请求深入研究的问题的
+// 回复，该回复调用了 questions widget 且没有写出报告。
 func askedFirst(messages []domain.Message) bool {
 	question := lastQuestion(messages)
 	if question < 0 || messages[question].Research == nil {
@@ -408,6 +462,7 @@ func askedFirst(messages []domain.Message) bool {
 
 // errResearchUnavailable refuses a research to a caller without a
 // subscription.
+// errResearchUnavailable 拒绝没有订阅的调用方发起 research。
 func errResearchUnavailable() error {
 	return api.Err(403, "TOOL_UNAVAILABLE", "Deep research is offered with a subscription").WithAction(api.ActionStop)
 }
@@ -415,6 +470,8 @@ func errResearchUnavailable() error {
 // allowResearch refuses a research turn its caller may not start now: one
 // from a caller without a subscription, or within an hour of when their last
 // research started. It counts nothing; startResearch does.
+// allowResearch 拒绝其调用方现在不能发起的 research turn：来自没有订阅的调用方，
+// 或距其上一次 research 开始不到一小时。它不计数；计数由 startResearch 完成。
 func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal, research bool) error {
 	if !research {
 		return nil
@@ -433,6 +490,7 @@ func (eng *Engine) allowResearch(ctx context.Context, r *Run, p *auth.Principal,
 }
 
 // startResearch counts a run's research as its caller's for the hour.
+// startResearch 将 run 的 research 计入其调用方的一小时额度。
 func (eng *Engine) startResearch(ctx context.Context, r *Run) error {
 	eng.Live.mu.Lock()
 	user := r.Principal.ID

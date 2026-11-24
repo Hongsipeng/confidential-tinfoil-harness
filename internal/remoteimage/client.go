@@ -1,4 +1,5 @@
 // Package remoteimage fetches public images without forwarding caller metadata.
+// Package remoteimage 抓取公开图片，而不转发调用方的元数据。
 package remoteimage
 
 import (
@@ -28,6 +29,7 @@ const (
 	maxImagePixels = 20_000_000
 	maxImageSide   = 16_384
 	// Decoding and orientation can each hold a full-size raster.
+	// 解码与方向校正各需要持有一份全尺寸位图。
 	maxConcurrentFetches = 8
 	maxRedirects         = 3
 	busyRetrySeconds     = 5
@@ -40,16 +42,19 @@ const (
 	imageUserAgent       = "TinfoilImageFetcher/1.0"
 )
 
+// Image 是一张图片的字节内容及其内容类型。
 type Image struct {
 	Bytes       []byte `json:"image_bytes"`
 	ContentType string `json:"image_content_type"`
 }
 
+// Client 通过受控的 HTTPS 抓取并规范化远程图片。
 type Client struct {
 	http  *http.Client
 	slots chan struct{}
 }
 
+// New 构造一个对出站连接施加 SSRF 防护的图片抓取客户端。
 func New() *Client {
 	guard := ssrf.New(ssrf.WithPorts(httpsPort))
 	dialer := &net.Dialer{Timeout: fetchTimeout, Control: guard.Safe}
@@ -105,6 +110,7 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 
 // Fetch returns a bounded PNG copy. Decoding drops active formats and metadata;
 // an animated image contributes only its first frame.
+// Fetch 返回一张有界大小的 PNG 副本。解码会丢弃有源格式与元数据；动图只保留首帧。
 func (c *Client) Fetch(ctx context.Context, rawURL string) (*Image, error) {
 	target, err := imageURL(rawURL)
 	if err != nil {

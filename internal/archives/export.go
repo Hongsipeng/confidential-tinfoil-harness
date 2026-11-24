@@ -28,6 +28,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/store"
 )
 
+// Service 提供归档的 share、export 与 import 等 HTTP 处理。
 type Service struct {
 	CPClient     *http.Client
 	Scratch      *Scratch
@@ -36,11 +37,14 @@ type Service struct {
 	Controlplane string
 	Store        *store.Store
 	// Imports runs each caller's cloud import.
+	// Imports 运行每个调用方的 cloud import。
 	Imports *jobs.Runner[ImportReport]
 	// anonymous are the signed-out callers with an archive running.
+	// anonymous 是正在运行归档的匿名调用者。
 	anonymous anonymousArchives
 }
 
+// ShareThread 生成一个可分享的聊天链接，并返回其 URL。
 func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *ShareRequest) (any, error) {
 	defer in.ClearKey()
 	id := in.ThreadID
@@ -67,6 +71,7 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 	payload := domain.SharePayload{V: 1, Title: t.Title, Messages: []domain.ShareMessage{}, CreatedAt: domain.Millis(t.CreatedAt)}
 	// A share shows the conversation; the summaries the model read in place
 	// of its older messages are not part of it.
+	// 分享展示对话内容；模型为替代旧消息而读取的摘要不属于其中。
 	for _, m := range t.Messages {
 		if m.Role == domain.CompactionRole {
 			continue
@@ -88,6 +93,7 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 	}
 	// A share is keyed by its chat, like the web client's: the control plane keeps a shared
 	// chat's blobs, and the owner can revoke the link by chat.
+	// 分享按其 chat 作 key，与 web 客户端一致：control plane 保存已分享 chat 的 blob，所有者可按 chat 撤销链接。
 	if _, err := ar.shareRequest(ctx, p, http.MethodPut, id, ciphertext); err != nil {
 		return nil, err
 	}
@@ -97,6 +103,7 @@ func (ar *Service) ShareThread(ctx context.Context, p *auth.Principal, _ auth.Co
 }
 
 // The share endpoints authenticate the owner's Clerk session.
+// 分享相关端点验证所有者的 Clerk 会话。
 func (ar *Service) shareRequest(ctx context.Context, p *auth.Principal, method, id string, body []byte) ([]byte, error) {
 	ctx = auth.WithCallerKey(ctx, string(p.JWT))
 	path := ar.Controlplane + "/api/shares/" + url.PathEscape(id)
@@ -123,6 +130,7 @@ func (ar *Service) shareRequest(ctx context.Context, p *auth.Principal, method, 
 	return b, nil
 }
 
+// RevokeShare 撤销一个分享链接。
 func (ar *Service) RevokeShare(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	if _, err := ar.shareRequest(ctx, p, http.MethodDelete, in.ThreadID, nil); err != nil && api.AsError(err).HTTP != 404 {
 		return nil, err
@@ -130,6 +138,7 @@ func (ar *Service) RevokeShare(ctx context.Context, p *auth.Principal, _ auth.Co
 	return struct{}{}, nil
 }
 
+// ShareStatus 返回某个聊天分享链接的状态。
 func (ar *Service) ShareStatus(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	b, err := ar.shareRequest(ctx, p, http.MethodGet, in.ThreadID, nil)
 	if err != nil {
@@ -147,6 +156,7 @@ func (ar *Service) ShareStatus(ctx context.Context, p *auth.Principal, _ auth.Co
 }
 
 // SharedThreadView is an opened share's payload, read like any old chat.
+// SharedThreadView 是已打开分享的载荷，像普通聊天一样读取。
 func SharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
 	t, err := domain.ReadThread(id, payload)
 	if err != nil {
@@ -164,6 +174,7 @@ func SharedThreadView(id string, payload []byte) (domain.SharedThread, error) {
 	return shared, nil
 }
 
+// OpenShare 打开一个分享链接并返回其内容。
 func (ar *Service) OpenShare(ctx context.Context, _ *auth.Principal, _ auth.ContentKey, in *openShareRequest) (any, error) {
 	id := in.ShareID
 	fragment, ok := strings.CutPrefix(in.Fragment, "v2:")
@@ -201,14 +212,20 @@ func (ar *Service) OpenShare(ctx context.Context, _ *auth.Principal, _ auth.Cont
 // device, which it sends, and, with its content key, everything it stores
 // in the cloud. Native backups hold every chat whole; a conversations
 // export holds them in the Claude-compatible format the web app wrote.
+// export 是一个流式输出的 ZIP 归档，包含客户端保存在设备上的聊天（由客户端发送），以及在提供 content key 时
+// 其存储在云端的所有内容。原生 backup 完整保存每个 chat；conversations export 则以 web 应用所写的
+// Claude 兼容格式保存。
 
 const (
 	// maxExportBody bounds an export request: its device chats and the
 	// images they show.
+	// maxExportBody 限制 export 请求的大小：其设备 chat 及其展示的 image。
 	maxExportBody = 512 << 20
 	// maxExportParts bounds the chats and images an export request sends.
+	// maxExportParts 限制 export 请求发送的 chat 与 image 数量。
 	maxExportParts = maxArchiveEntries
 	// maxProjectsExport bounds the Claude-compatible projects file.
+	// maxProjectsExport 限制 Claude 兼容 projects 文件的大小。
 	maxProjectsExport = 64 << 20
 )
 
@@ -219,6 +236,7 @@ type exportOptions struct {
 
 // exportForm is an export request: its options, and its device chats and
 // the originals of their images, spooled to scratch space.
+// exportForm 是一个 export 请求：其选项，以及暂存到临时空间的设备 chat 及其 image 原件。
 type exportForm struct {
 	options   exportOptions
 	spool     *scratchFile
@@ -230,10 +248,12 @@ type spooledPart struct {
 	offset, size int64
 }
 
+// HandleExport 处理 export 请求，按格式流式输出归档或项目文件。
 func (ar *Service) HandleExport(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	// An archive calls no model, so any caller may make one, with or
 	// without chat access: a signed-out caller of the chats its tab keeps.
+	// 归档不调用模型，因此任何调用方都可创建，无论是否拥有 chat 访问权：匿名调用方只能访问其标签页持有的 chat。
 	p, err := ar.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -417,6 +437,7 @@ func (f *exportForm) read(part spooledPart) ([]byte, error) {
 }
 
 // thread reads one of the request's device chats.
+// thread 读取请求中的一个设备 chat。
 func (f *exportForm) thread(i int) (domain.Thread, error) {
 	data, err := f.read(f.threads[i])
 	if err != nil {
@@ -429,6 +450,7 @@ func (f *exportForm) thread(i int) (domain.Thread, error) {
 
 // deviceImage is a device chat image's bytes: the original its client
 // sent, or the copy the chat holds.
+// deviceImage 是设备 chat 中 image 的字节：客户端发送的原件，或 chat 持有的副本。
 func (f *exportForm) deviceImage(a *domain.Attachment) ([]byte, error) {
 	if part, ok := f.originals[a.ID]; ok {
 		return f.read(part)
@@ -444,9 +466,11 @@ func (f *exportForm) deviceImage(a *domain.Attachment) ([]byte, error) {
 }
 
 // noDocument is a device chat's document, which holds whatever content it has.
+// noDocument 表示设备 chat 的 document，即保留其所拥有的任何内容。
 func noDocument(*domain.Attachment) error { return errAttachmentMissing }
 
 // cloudImage is a stored image's bytes; one buckets no longer holds is missing.
+// cloudImage 返回已存储 image 的字节；bucket 已不再持有的则视为缺失。
 func (ar *Service) cloudImage(ctx context.Context, p *auth.Principal) func(*domain.Attachment) ([]byte, error) {
 	return func(a *domain.Attachment) ([]byte, error) {
 		if a.Base64 == "" && a.StorageKey() == "" {
@@ -465,10 +489,12 @@ func (ar *Service) cloudDocument(ctx context.Context, p *auth.Principal) func(*d
 
 // missing is whether an attachment's content is left out: its source does
 // not hold it, or did not serve it.
+// missing 判断 attachment 的内容是否被省略：其来源未持有或未提供。
 func missing(err error) bool { return err == errAttachmentMissing || err == errAttachmentUnavailable }
 
 // logFailedExport records an export that failed as it was written: why, how
 // long its request ran, and how many chats it held by then.
+// logFailedExport 记录写入过程中失败的 export：原因、请求运行时长，以及当时已处理的 chat 数。
 func logFailedExport(ctx context.Context, format string, started time.Time, chats int, err error) {
 	if err == nil {
 		return
@@ -480,6 +506,7 @@ func logFailedExport(ctx context.Context, format string, started time.Time, chat
 // streamArchive answers with an archive as it is written. A failure before
 // its first bytes is answered as an error; one after cuts the response,
 // so the client never keeps a partial archive.
+// streamArchive 边写边输出归档。在首字节之前失败会以错误应答；之后失败则中断响应，使客户端不会保留残缺归档。
 func streamArchive(w http.ResponseWriter, name string, write func(*archiveResponse) error) {
 	out := &archiveResponse{w: w, name: name}
 	if err := write(out); err != nil {
@@ -497,6 +524,7 @@ type archiveResponse struct {
 	started bool
 }
 
+// Write 在首次写入时设置响应头与状态码，然后写出数据。
 func (a *archiveResponse) Write(p []byte) (int, error) {
 	if !a.started {
 		a.started = true
@@ -509,6 +537,7 @@ func (a *archiveResponse) Write(p []byte) (int, error) {
 }
 
 // Flush sends the client what the archive has written so far.
+// Flush 把归档目前已写入的内容发送给客户端。
 func (a *archiveResponse) Flush() error {
 	if !a.started {
 		return nil
@@ -518,6 +547,7 @@ func (a *archiveResponse) Flush() error {
 
 // writeBackup writes a native backup: the cloud's projects, documents and
 // chats when the key is given, then the device's chats.
+// writeBackup 写一个原生 backup：给定 key 时先写云端的 project、document 与 chat，再写设备 chat。
 func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out io.Writer, started time.Time) (err error) {
 	b := NewBackupWriter(out)
 	defer func() {
@@ -587,6 +617,7 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 			return err
 		}
 		// A chat moved to the cloud whose device copy remains is kept once.
+		// 已上云但设备上仍有副本的 chat 只保留一次。
 		if cloudChats[t.ID] {
 			b.omit(BackupOmission{Kind: "local_chat", SourceID: t.ID, Category: "invalid", Reason: "duplicate_chat_id"})
 			continue
@@ -605,6 +636,8 @@ func (ar *Service) writeBackup(ctx context.Context, p *auth.Principal, key *auth
 // eachStoredChat hands write the stored chats page by page, with the reads
 // of each chat's attachments, leaving out those skip, when given, names. It
 // names each chat this harness or the key cannot read.
+// eachStoredChat 逐页把已存储 chat 交给 write，并附上每个 chat 的 attachment 读取；若给定 skip，则略过其命名的 chat。
+// 它报告本 harness 或该 key 无法读取的每个 chat。
 func (ar *Service) eachStoredChat(ctx context.Context, p *auth.Principal, key *auth.ContentKey, unreadable func(id string), skip func(*domain.Thread) bool, write func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error) error {
 	if err := ar.renewGrant(ctx, p, key); err != nil {
 		return err
@@ -642,12 +675,15 @@ func (ar *Service) eachStoredChat(ctx context.Context, p *auth.Principal, key *a
 // renewGrant has the export's grant last another while from now. An export
 // of many chats can outlive the grant it began with; the request it serves,
 // which ends with it, bounds it.
+// renewGrant 让 export 的授权从此刻起再持续一段时间。包含大量 chat 的 export 可能超过其初始授权的时长；
+// 它服务的请求会随其结束而结束，从而约束它。
 func (ar *Service) renewGrant(ctx context.Context, p *auth.Principal, key *auth.ContentKey) error {
 	return ar.Store.AuthorizeArchive(ctx, p, key[:], "export")
 }
 
 // backupChat writes a chat with each of its images beside it. An image or
 // document whose content cannot be read is left out and listed as omitted.
+// backupChat 写出一个 chat 及其每张 image。无法读取内容的 image 或 document 会被略过并列为 omitted。
 func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
 	entry := backupThread{Thread: *t, Messages: make([]backupMessage, 0, len(t.Messages))}
 	entry.ActiveRun, entry.LastRequestID, entry.LastRequestKind, entry.Flagged, entry.HiddenCount, entry.RecordVersion, entry.ImportedFrom = nil, "", "", false, 0, 0, nil
@@ -735,6 +771,8 @@ func backupChat(b *BackupWriter, rel *backupRelationships, kind string, t *domai
 // The conversations export is Claude's conversation format with Tinfoil's
 // attachments, as the web app wrote it: conversations.json, each image's
 // bytes under attachments/, and a manifest of them.
+// conversations export 是带 Tinfoil attachment 的 Claude 对话格式，如 web 应用所写：conversations.json、
+// 每张 image 的字节放在 attachments/ 下，外加一个它们的 manifest。
 
 type exportConversation struct {
 	UUID         string          `json:"uuid"`
@@ -769,6 +807,7 @@ type exportAttachment struct {
 	TextContent string `json:"textContent,omitempty"`
 }
 
+// ConversationsManifest 是 conversations export 的 manifest，记录其中的 chat 与 attachment。
 type ConversationsManifest struct {
 	Version         int            `json:"version"`
 	CreatedAt       string         `json:"created_at"`
@@ -789,18 +828,24 @@ type exportedFile struct {
 // chat is written, so a chat names only the images the archive holds, and
 // read again once every chat is written: kept meanwhile, an export's images
 // could take more scratch space than there is.
+// conversationsExport 边读 chat 边写 conversations.json，再写它们展示的 image，最后写 manifest。每张 image
+// 在其 chat 写入前读取，因此 chat 只命名归档实际持有的 image；全部 chat 写完后再次读取：若中途保留，
+// export 的 image 可能占用超过现有量的临时空间。
 type conversationsExport struct {
 	zip *zip.Writer
 	out *archiveResponse
 	// conversations is conversations.json, which deflate compresses.
+	// conversations 是 conversations.json，用 deflate 压缩。
 	conversations io.Writer
 	deflate       *flate.Writer
 	used          map[string]bool
 	manifest      ConversationsManifest
 	// images are those the chats written so far show, in the order they
 	// are written.
+	// images 是到目前为止已写 chat 所展示的 image，按写入顺序排列。
 	images []exportedImage
 	// again is the chat last read again for the images it holds.
+	// again 是最近一次为读取其 image 而重读的 chat。
 	again struct {
 		id   string
 		chat domain.Thread
@@ -811,6 +856,8 @@ type conversationsExport struct {
 // path it names, the digest of the bytes it was read as, and what reading
 // it again takes. One whose bytes its chat holds is read from the chat,
 // read again, rather than kept meanwhile.
+// exportedImage 是 chat 命名的 image，等 chat 写完后再写：含其路径、读取时字节的摘要，以及再次读取所需信息。
+// 字节由其 chat 持有的，会从 chat 中再次读取，而非中途保留。
 type exportedImage struct {
 	path, sha256 string
 	attachment   domain.Attachment
@@ -819,6 +866,7 @@ type exportedImage struct {
 
 // heldImage is an image in its chat: the chat, how to read it again, and
 // the image's place in it.
+// heldImage 是其 chat 中的 image：含 chat、再次读取方式，以及该 image 在其中的位置。
 type heldImage struct {
 	chatID      string
 	chat        func() (domain.Thread, error)
@@ -827,6 +875,7 @@ type heldImage struct {
 
 // imagesPerGrant bounds the stored images an export reads again under one
 // renewal of its grant, as a page bounds the chats it reads under one.
+// imagesPerGrant 限制 export 在一次授权续期下再次读取的已存储 image 数，正如 page 限制一次读取的 chat 数。
 const imagesPerGrant = 100
 
 func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, key *auth.ContentKey, form *exportForm, out *archiveResponse, started time.Time) (err error) {
@@ -855,6 +904,7 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 	e.images = nil
 	if key != nil {
 		// A chat this harness or the key cannot read is left out, and listed.
+		// 本 harness 或该 key 无法读取的 chat 会被略过并列入清单。
 		err := ar.eachStoredChat(ctx, p, key, func(id string) {
 			e.manifest.Warnings = append(e.manifest.Warnings, "Could not read chat "+id)
 		}, func(t *domain.Thread) bool { return device[t.ID] }, func(t *domain.Thread, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error) error {
@@ -904,6 +954,7 @@ func (ar *Service) writeConversations(ctx context.Context, p *auth.Principal, ke
 // writeStoredImages reads stored images again under a renewal of the
 // export's grant: those storage keeps a few at a time ahead of the one it
 // writes.
+// writeStoredImages 在 export 授权续期下再次读取已存储 image：存储每次提前保留几个，赶在写入的那个之前。
 func (ar *Service) writeStoredImages(ctx context.Context, p *auth.Principal, key *auth.ContentKey, e *conversationsExport, images []exportedImage) error {
 	if err := ar.renewGrant(ctx, p, key); err != nil {
 		return err
@@ -933,6 +984,7 @@ func (ar *Service) writeStoredImages(ctx context.Context, p *auth.Principal, key
 
 // readAgain reads an image again as read does: from its chat, read again,
 // when the chat holds its bytes.
+// readAgain 像 read 那样再次读取 image：当 chat 持有其字节时，从该 chat 再次读取。
 func (e *conversationsExport) readAgain(image exportedImage, read func(*domain.Attachment) ([]byte, error)) ([]byte, error) {
 	in := image.held
 	if in == nil {
@@ -954,6 +1006,7 @@ func (e *conversationsExport) readAgain(image exportedImage, read func(*domain.A
 
 // writeImage writes an image a chat names, read again. One that cannot be
 // read as it first was fails the export, whose chats already name it.
+// writeImage 写出 chat 命名的、已再次读取的 image。无法按首次读取方式读到的会使 export 失败，因为其 chat 已命名它。
 func (e *conversationsExport) writeImage(image exportedImage, data []byte, err error) error {
 	if err != nil {
 		return err
@@ -965,6 +1018,7 @@ func (e *conversationsExport) writeImage(image exportedImage, data []byte, err e
 }
 
 // flush sends the client what the archive holds so far.
+// flush 把归档当前持有的内容发送给客户端。
 func (e *conversationsExport) flush() error {
 	if err := e.deflate.Flush(); err != nil {
 		return err
@@ -977,6 +1031,7 @@ func (e *conversationsExport) flush() error {
 
 // indentedJSON is a value as JSON.stringify(value, null, 2) writes it,
 // each line after the first prefixed.
+// indentedJSON 按 JSON.stringify(value, null, 2) 的格式输出值，第一行之后每行都加前缀。
 func indentedJSON(v any, prefix string) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
@@ -989,10 +1044,12 @@ func indentedJSON(v any, prefix string) ([]byte, error) {
 }
 
 // chat writes a chat, which reread reads again.
+// chat 写出一个 chat，reread 可再次读取它。
 func (e *conversationsExport) chat(t *domain.Thread, projectID string, image func(*domain.Attachment) ([]byte, error), document func(*domain.Attachment) error, reread func() (domain.Thread, error)) error {
 	c := exportConversation{UUID: t.ID, Name: t.Title, CreatedAt: exportTime(t.CreatedAt, t.UpdatedAt), UpdatedAt: exportTime(t.UpdatedAt, t.CreatedAt), ProjectID: projectID, ChatMessages: []exportMessage{}}
 	// The summaries of compacted messages are not part of the conversation,
 	// nor counted in its messages' ids.
+	// 已 compacted 消息的摘要不属于对话，也不计入其消息 id。
 	for i, m := range t.Messages {
 		if m.Role == domain.CompactionRole {
 			continue
@@ -1071,6 +1128,7 @@ func (e *conversationsExport) attachment(a domain.Attachment, image func(*domain
 
 // uniquePath is where an image is written, numbered past any image of the
 // same id and name before it.
+// uniquePath 是 image 的写入位置，在出现相同 id 与名称的 image 时追加序号。
 func (e *conversationsExport) uniquePath(safeID, safeName string) string {
 	base := "attachments/" + safeID + "/" + safeName
 	if !e.used[base] {
@@ -1093,6 +1151,7 @@ func (e *conversationsExport) uniquePath(safeID, safeName string) string {
 // sanitizeFilename is a name made safe as one archive path segment, as the
 // web app made it: its last segment, with every character outside a small
 // set, counted in UTF-16 units, replaced.
+// sanitizeFilename 把名称做成安全的单段归档路径，与 web 应用一致：取最后一段，将小集合之外的字符（按 UTF-16 计）替换掉。
 func sanitizeFilename(name, fallback string) string {
 	return cmp.Or(cleanFilename(name), cleanFilename(fallback), "file")
 }
@@ -1117,6 +1176,7 @@ func cleanFilename(name string) string {
 }
 
 // exportDocumentText is a document's text, or its pages' when it has none.
+// exportDocumentText 返回 document 的文本，无文本时返回其 page 的文本。
 func exportDocumentText(text string, pages []domain.DocumentPage) string {
 	if strings.TrimSpace(text) != "" {
 		return text
@@ -1135,6 +1195,7 @@ func exportDocumentText(text string, pages []domain.DocumentPage) string {
 }
 
 // TimelineText joins the text of a reply's blocks of one type.
+// TimelineText 拼接回复中某一类型 block 的文本。
 func TimelineText(timeline []domain.Block, kind string) string {
 	var b strings.Builder
 	for _, block := range timeline {
@@ -1147,6 +1208,7 @@ func TimelineText(timeline []domain.Block, kind string) string {
 
 // exportTime is the first time given that parses, written as JavaScript
 // writes a date, or the epoch when none does.
+// exportTime 返回给定值中第一个能解析的时间，以 JavaScript 写日期的方式输出；都不解析时返回纪元。
 func exportTime(values ...string) string {
 	for _, value := range values {
 		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
@@ -1158,6 +1220,7 @@ func exportTime(values ...string) string {
 
 // claudeProject is a project in Claude's export format, with its
 // documents' text.
+// claudeProject 是 Claude export 格式中的 project，含其 document 文本。
 type claudeProject struct {
 	UUID           string           `json:"uuid"`
 	Name           string           `json:"name"`
@@ -1180,6 +1243,7 @@ func (ar *Service) claudeProjects(ctx context.Context, p *auth.Principal, key au
 	total := 0
 	err := ar.Store.EachRow(ctx, p, key, "project", "", func(row *domain.StoredRow) error {
 		// A document this harness cannot read is left out, as a chat is.
+		// 本 harness 无法读取的 document 会被略过，chat 亦然。
 		docs, err := ar.Store.ProjectDocuments(ctx, p, key, row.ID, func(string, error) error { return nil })
 		if err != nil {
 			return err

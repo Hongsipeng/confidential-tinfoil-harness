@@ -1,0 +1,3008 @@
+openapi: 3.1.1
+
+info:
+  title: Tinfoil Chat 运行内核（harness）
+  version: "1"
+  description: |
+    Tinfoil Chat 客户端与运行内核（harness）enclave 之间的协议。
+
+    每个 chat 请求都是经由经过 attestation 的、EHBP 封存的传输通道发出的 POST，因此正文对客户端与 enclave 私密，而请求头对 gateway 可见。请求头只携带非私密内容：`Authorization` 携带调用方的身份（Clerk session token、未登录调用方的 `free_` key，或 `tk_` API key，其持有者按未登录调用方对待，并像 API 请求的调用方一样为该 chat 的联网搜索付费），`X-Tinfoil-Inference-Key` 携带客户端 mint 的 chat 访问权限，`Accept-Language` 携带调用方的语言。关于某个 run 的请求会指明持有它的实例，并在 follow 它时指明客户端已应用的最后一个 event。其余内容，包括路由需要时账户的 content key，都在正文中。
+
+    一个 run 的 event 以 server-sent event 的形式到达。每一帧的 `data` 是一个 event，由 `x-item-schema`（OpenAPI 3.2 的 `itemSchema`）描述，其 `id` 是该 event 在该 run 中的游标，follow 该 run 的客户端会把它作为 `Last-Event-ID` 发回。一次 MESSAGES_SNAPSHOT 最多容纳 8 MiB 的 message：它会略去放不下的最旧 message 并设置 `hasOlder`，并把一条单独发送就过大的最新 message 连同其 attachment 的文本一并略去，客户端按读取已存储 chat 的方式读取它。
+
+    harness 只保留长 run 中较新的 event。从这些 event 之前开始 follow 的客户端会先收到一个 checkpoint：run 从开始起的 event，按顺序，其中每一串扩展同一条 message 或同一个调用的 TEXT_MESSAGE_CHUNK、REASONING_MESSAGE_CHUNK 或 TOOL_CALL_ARGS event 会合并成更少的 event（保留 run 第一个和最后一个 event 的时间），每个 tool 的活动则作为其当前状态的一个 ACTIVITY_SNAPSHOT，放在其第一个 event 的位置。只有 checkpoint 的最后一帧带 `id`，因此漏掉其中一部分的客户端会再次收到全部内容；checkpoint 所持有的 run 自身的 MESSAGES_SNAPSHOT 会把 chat 恢复到 run 开始时的位置。
+
+    本文档按如下规则演进，因此针对它发布的客户端可以持续工作：
+
+    - 改动是增量式的。只要还有受支持的客户端在使用，路由、成员、event 或错误码就不会被移除，也不会改变含义。
+    - 客户端忽略它不认识的成员和 event。它按错误的 action 处理它不认识的错误码。
+    - 客户端读取任意大小的 event。harness 允许一个 event 增长到多大，由它自己决定。
+    - 响应所持有的取值列表可以新增取值：这类列表是它所列举的取值与任意字符串的 anyOf。harness 只发送所列举的取值；客户端把它不认识的取值按该列表的说明处理。
+    - 客户端完整保留一条 ThreadRecord，包括它不认识的成员，并按返回的原样发回。它可以在 ThreadInput 说明的位置略去该记录最新 compaction 标记之前的 message。
+    - 对 ThreadRecord 或存储行内容的任何改动都会改变其 recordVersion。harness 按原样读取它认识的版本的记录，把没有版本的记录当作旧客户端保留的记录读取，并对其余任何记录以 RECORD_UNSUPPORTED 拒绝。它认识版本 1 和版本 2；版本 2 为 chat 增加了 compaction 标记，其余与版本 1 相同。
+      版本 2 的 profile 行还可能持有 readAloudSpeed，harness 若未提及它也会保留它，就像它保留任何未提及的 profile 成员一样；下一个版本会提及它。版本 2 chat 的 reply 还可能持有 research，harness 若未提及它，在把 chat 写回时就会略去它，并按 reply 的 step 读取该 reply；下一个版本会提及它。
+      harness 在写记录前会先读取它。存储行中它未提及的成员会被略过，因为同一行的其他客户端会写入各自的成员；harness 把行写回时会略去这些成员，但 profile 行除外。在 profile 行中它会保留这些成员，并且对它修改的每个字段，都会推进各应用自身 profile 同步保存在 fieldClocks 中的编辑时钟，用 clockVersion 标记时钟为当前，使这些应用仍能合并该行。
+    - harness 忽略它不认识的请求成员，但 profile patch 除外，后者会拒绝它们。
+    - 可选行为在 session 的 `features` 中声明。客户端只在该 feature 为 true 时依赖它。
+
+    这里的 schema 都保持对象开放，因为客户端必须容忍更新的 harness 添加的成员。harness 的测试会把它发送的所有内容约束到封闭形式：它不会发送本文档未提及的任何成员。
+
+    本文档旁边的 fixture 是 harness 录制的 run，供每个客户端在其测试中回放。fixture 的帧是带游标的 run event。客户端按顺序应用它们，跳过该 run 中游标已应用过的，然后必须展示预期内容所要求的东西：每条 message 的 id 和 role，question 或 compaction 标记的 content，以及 reply 的 timeline step 各自的 id、type，以及 content、toolCallId、name、arguments、complete、result、progress、display 中它们所拥有的任意几项，还有 reply 的 research（如果有的话）；chat 的 title 和 titleState；以及 run 是以空闲状态还是以错误结束：错误时，其 RUN_ERROR 中除 type、timestamp、threadId、runId 和 metadata 之外的每个成员。
+
+servers:
+  - url: https://chat-api.tinfoil.sh
+
+security:
+  - identity: []
+    chatAccess: []
+  - identity: []
+
+tags:
+  - name: session
+    description: 客户端打开时获得的内容。
+  - name: runs
+    description: turn、其 run 的 event 流，以及正在运行的 reply 之后的队列。
+  - name: threads
+    description: 已存储的 chat 与设备 chat。
+  - name: shares
+    description: 分享链接及其打开。
+  - name: profile
+    description: 账户的设置。
+  - name: projects
+    description: project 及其 document。
+  - name: keys
+    description: 账户的 content key 及其 passkey bundle，即 control plane 保存的形式。
+  - name: attachments
+    description: 上传与 attachment 下载。
+  - name: archives
+    description: import 与 export。
+  - name: speech
+    description: 转写与朗读。
+  - name: metadata
+    description: 在 enclave 内抓取的图片、favicon 与链接预览。
+
+paths:
+
+  /healthz:
+    get:
+      operationId: health
+      summary: 报告 harness 正在服务
+      security: []
+      responses:
+        "200":
+          description: harness 正在服务。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {const: true}
+
+  /metrics:
+    get:
+      operationId: metrics
+      summary: 导出聚合服务指标
+      description: Prometheus HTTP、run 生命周期与运行时指标。受监测的 shim 会在转发此运维端点前用 metrics.read 校验 admin key。不会导出任何 chat 内容、调用方标识或凭证。
+      security:
+        - metricsAdmin: []
+      responses:
+        "200":
+          description: Prometheus 文本展示格式。
+          content:
+            text/plain:
+              schema: {type: string}
+
+  /v1/session:
+    post:
+      operationId: session
+      summary: 打开应用
+      tags: [session]
+      description: 客户端打开应用时获得的内容。未登录调用方也会得到应答。
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {$ref: "#/components/responses/Session"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/changes:
+    post:
+      operationId: changes
+      summary: 读取已存储数据的修订版本
+      tags: [session]
+      description: 账户已存储的 chat、profile 与 project 的修订版本，会在其他设备写入它们时变化。
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200":
+          description: 当前的修订版本。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chats, profile, projects]
+                properties:
+                  chats: {type: string}
+                  profile: {type: string}
+                  projects: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/turn:
+    post:
+      operationId: turn
+      summary: 运行一个 turn
+      tags: [runs]
+      description: 启动一个 run，用于执行对 chat 的一次用户操作并流式输出。当 enclave 内存不足时，新的 turn 会以 SERVICE_BUSY 和 retryAfter 拒绝，好让已在运行的 reply 可以完成；对已启动的 turn 再次发送请求，仍会 follow 其 run。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Turn"}
+      responses:
+        "200": {$ref: "#/components/responses/RunEvents"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/browser/result:
+    post:
+      operationId: browserResult
+      summary: 返回浏览器 action 的结果
+      tags: [runs]
+      description: |
+        local browser turn 的 executor 会为待处理的 executionId 返回一个结果，
+        该结果以该 turn 私有的 executor token 认证。在 run 存续期间，完全相同的
+        retry 会被接受；冲突或未知的 execution 会被拒绝。客户端在行动前记录意图，
+        在发送前记录结果。重放 event 绝不能重复执行某个 action。结果不确定时
+        需要观察页面并由用户介入，而不是重放。截图只在本 run 期间送达模型；
+        event 与返回的 thread 只携带文本。
+      parameters:
+        - {$ref: "#/components/parameters/HarnessInstance"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/BrowserResultInput"}
+      responses:
+        "200":
+          description: 结果已被接受。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: {const: true}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/follow:
+    post:
+      operationId: follow
+      summary: 重新接入一个正在进行的 run
+      tags: [runs]
+      parameters:
+        - {$ref: "#/components/parameters/HarnessInstance"}
+        - {$ref: "#/components/parameters/LastEventId"}
+      description: 为丢失流的客户端从它已应用的最后一个 event 之后重新流式输出一个正在进行的 run。设备 chat 的 run 在结束后仍可被 follow 三十分钟，直到再次 follow 它的客户端把它读到末尾，这样丢失流的客户端就能拿到该 run 返回的 chat。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/FollowInput"}
+      responses:
+        "200": {$ref: "#/components/responses/RunEvents"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/cancel:
+    post:
+      operationId: cancel
+      summary: 停止一个 run
+      description: 停止该 chat 正在运行的 reply。排在它后面的 turn 也随之结束，各带一个 cancelled 的 RUN_FINISHED，因此 chat 的 reply 一旦停止，harness 就不再保留它的任何内容。仍在排队的 turn 则被移除，就像 queue/remove 那样移除它，它前面的 reply 继续。
+      tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RunRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/queue/send:
+    post:
+      operationId: queueSend
+      summary: 立即发送一个排队的 turn
+      tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
+      description: 立即启动排在正在运行的 reply 后面的 turn，并停止该 reply。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RunRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/queue/remove:
+    post:
+      operationId: queueRemove
+      summary: 移除一个排队的 turn
+      tags: [runs]
+      parameters: [{$ref: "#/components/parameters/HarnessInstance"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RunRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/list:
+    post:
+      operationId: list
+      summary: 列出已存储的 chat
+      tags: [threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                cursor: {type: string}
+                projectId: {type: string}
+                limit: {type: integer}
+      responses:
+        "200":
+          description: 账户已存储 chat 的一页，最新在前，以及其置顶的 chat。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [threads, nextCursor, pinned]
+                properties:
+                  threads: {type: array, items: {$ref: "#/components/schemas/ThreadSummary"}}
+                  nextCursor: {type: string, description: "最后一页为空。"}
+                  pinned: {type: array, items: {$ref: "#/components/schemas/ThreadSummary"}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/search:
+    post:
+      operationId: search
+      summary: 搜索已存储的 chat
+      tags: [threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                query: {type: string}
+                limit: {type: integer}
+      responses:
+        "200":
+          description: 匹配的已存储 chat、harness 无法打开的其他匹配数量，以及搜索索引是否仍在构建中。control plane 未能及时提供的 chat 会以 UPSTREAM_REFUSED 使搜索失败，搜索索引重建失败则以 SEARCH_INDEX_FAILED 表示。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, unreadable, indexing]
+                properties:
+                  results: {type: array, items: {$ref: "#/components/schemas/ThreadSummary"}}
+                  unreadable: {type: integer, minimum: 0, description: "因无法打开而未纳入结果的匹配 chat，例如用另一个 key 封存的，或以本 harness 无法读取的格式存储的。"}
+                  indexing: {type: boolean}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/get:
+    post:
+      operationId: get
+      summary: 打开一个已存储的 chat
+      tags: [threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                id: {$ref: "#/components/schemas/Identifier"}
+                before: {type: string, description: "一个 message id；窗口在其之前结束。"}
+                limit: {type: integer, description: "至多 200；缺省为 50。"}
+      responses:
+        "200": {$ref: "#/components/responses/ThreadWindow"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/update:
+    post:
+      operationId: update
+      summary: 修改 chat 的设置
+      tags: [threads]
+      description: 修改 chat 的设置。云端 chat 返回其摘要，设备 chat 返回其新记录。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                local: {type: boolean}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+                id: {$ref: "#/components/schemas/Identifier"}
+                title: {type: string}
+                model: {type: string}
+                webSearchEnabled: {type: boolean}
+                pinned: {type: boolean, description: "仅限云端 chat。"}
+                projectId: {type: [string, "null"], description: "仅限云端 chat。null 会把该 chat 从其 project 中移出。"}
+                presetId: {type: [string, "null"], description: "选择另一个 prompt 会采用它所选定的设置，但本请求所设置的除外。"}
+      responses:
+        "200":
+          description: 修改后的 chat。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {$ref: "#/components/schemas/ThreadSummary"}
+                  - {$ref: "#/components/schemas/DeviceThreadReply"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/fork:
+    post:
+      operationId: fork
+      summary: 派生一个 chat
+      tags: [threads]
+      description: 把 chat 复制到其某条 message 为止的内容，形成一个新的 chat。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MessageRequest"}
+      responses:
+        "200":
+          description: 新的 chat。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {$ref: "#/components/schemas/ThreadSummary"}
+                  - {$ref: "#/components/schemas/DeviceThreadReply"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/messages/delete:
+    post:
+      operationId: messageDelete
+      summary: 删除一条 message
+      tags: [threads]
+      description: 删除一条 message，以及其后摘要覆盖了它的每个 compaction 标记。compaction 标记本身不会被删除。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MessageRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/ChangedThread"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/messages/update:
+    post:
+      operationId: messageUpdate
+      summary: 编辑一条 reply
+      tags: [threads]
+      description: 原地编辑 reply 的文本，并删除其后摘要覆盖了该 reply 原状的每个 compaction 标记。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threadId, messageId, content]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                local: {type: boolean}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                messageId: {$ref: "#/components/schemas/Identifier"}
+                content: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/ChangedThread"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/messages/answer:
+    post:
+      operationId: messageAnswer
+      summary: 回答 reply 的问题
+      tags: [threads]
+      description: |
+        保存用户在 reply 的某个 questions widget 中所选的 option，而不启动 turn。
+        每个被指明的 question 采用所选的 option，其余保持其 answer。用户接下来
+        发送的 question 会携带已更改的 answer，模型正是这样读取它们的。
+        chat 已不再持有的 widget、question 或 option 会以 REVISION_CONFLICT 拒绝。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threadId, messageId, toolCallId, answers]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                local: {type: boolean}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                messageId: {$ref: "#/components/schemas/Identifier"}
+                toolCallId: {type: string, description: "questions widget 的调用。"}
+                answers:
+                  type: object
+                  minProperties: 1
+                  description: "按 question id 给出所选 option 的 id，或 null 表示该 question 不回答。单选 question 只接受一个 option。"
+                  additionalProperties:
+                    type: [array, "null"]
+                    items: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/ChangedThread"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/delete:
+    post:
+      operationId: delete
+      summary: 删除一个 chat
+      tags: [threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                id: {$ref: "#/components/schemas/Identifier"}
+                revision: {type: string, description: "当把已移到设备的 chat 从云端删除时设置；此时 delete 需要该移入操作所读取的 revision。"}
+                local: {type: boolean, description: "该 chat 是客户端删除的设备 chat。其正在运行的 reply 会停止，harness 会丢弃它所保留的该 chat 的 reply；已存储内容不变。"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/delete-all:
+    post:
+      operationId: deleteAll
+      summary: 删除所有 chat
+      tags: [threads]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                projectId: {type: [string, "null"]}
+                local: {type: boolean, description: "客户端删除了所有设备 chat。它们正在运行的 reply 会停止，harness 会丢弃它所保留的这些 chat 的 reply；已存储内容不变。计数是它保留过任何内容的 chat 的数量。"}
+      responses:
+        "200": {$ref: "#/components/responses/Deleted"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/transcript:
+    post:
+      operationId: transcript
+      summary: 读取一个已存储的 chat 以将其移到设备
+      tags: [threads]
+      description: 设备所保存形式的已存储 chat，用于把它移到设备。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threadId]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+      responses:
+        "200":
+          description: chat 以及完成移入的 delete 所应指明的 revision。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [thread, revision]
+                properties:
+                  thread: {$ref: "#/components/schemas/ThreadRecord"}
+                  revision: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/import:
+    post:
+      operationId: threadImport
+      summary: 把设备 chat 存入云端
+      tags: [threads]
+      description: 把设备 chat 以其 id 存入云端。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threadId, thread]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+      responses:
+        "200":
+          description: 已存储的 chat。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ThreadSummary"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/upgrade:
+    post:
+      operationId: upgrade
+      summary: 转换旧客户端保留的设备 chat
+      tags: [threads]
+      description: 把旧客户端保留的设备 chat 转换为当前记录。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threads]
+              properties:
+                threads: {type: array, items: {type: object}}
+      responses:
+        "200":
+          description: 这些 chat，按发送顺序。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [threads]
+                properties:
+                  threads: {type: array, items: {$ref: "#/components/schemas/ThreadRecord"}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/share:
+    post:
+      operationId: share
+      summary: 分享一个 chat
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [threadId]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                local: {type: boolean}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+      responses:
+        "200":
+          description: 分享链接，其 fragment 保存着打开它的 key。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/share/status:
+    post:
+      operationId: shareStatus
+      summary: 读取 chat 是否已被分享
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ThreadIdRequest"}
+      responses:
+        "200":
+          description: 该 chat 是否有生效的分享。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [shared]
+                properties:
+                  shared: {type: boolean}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/threads/share/revoke:
+    post:
+      operationId: shareRevoke
+      summary: 停止分享一个 chat
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ThreadIdRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/shares/open:
+    post:
+      operationId: shareOpen
+      summary: 打开一个已分享的 chat
+      tags: [shares]
+      security: [{}, {identity: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [shareId, fragment]
+              properties:
+                shareId: {$ref: "#/components/schemas/Identifier"}
+                fragment: {type: string, description: "分享链接的 fragment。"}
+      responses:
+        "200":
+          description: 已分享的 chat。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SharedThread"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/profile/get:
+    post:
+      operationId: profileGet
+      summary: 读取 profile
+      tags: [profile]
+      description: 对账户注册 key 之外的 key 以 KEY_MISMATCH 拒绝，即使尚未存储 profile 也是如此，因此客户端能从这次读取得知其 key 能否打开该账户。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Keyed"}
+      responses:
+        "200": {$ref: "#/components/responses/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/profile/update:
+    post:
+      operationId: profileUpdate
+      summary: 修改 profile
+      tags: [profile]
+      description: 设置 patch 所指明的字段，随后在适用时把保存的 prompt 与收藏编辑应用到存储中的 profile。当 session 的 features.promptPresetEdits 为 true 时，客户端通过这些编辑修改保存的 prompt 与收藏，而不是发送它早先读取的整份列表；当 features.promptPresetUpdates 为 true 时，客户端通过只指明用户改动内容的 update 来修改保存的 prompt，而不是保存它早先读取的副本。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                patch:
+                  description: 要设置的字段。profile 不存在的字段会被拒绝。null 的 defaultPromptPresetId 会清除默认 prompt。
+                  type: object
+                  properties:
+                    themeMode: {type: string, enum: [light, dark, system]}
+                    chatFont: {type: string, enum: [system, serif, mono, dyslexic]}
+                    language: {type: string}
+                    nickname: {type: string}
+                    profession: {type: string}
+                    traits: {type: array, items: {type: string}}
+                    additionalContext: {type: string}
+                    isUsingPersonalization: {type: boolean}
+                    isUsingCustomPrompt: {type: boolean}
+                    customSystemPrompt: {type: string}
+                    customPromptPresets: {type: array, items: {$ref: "#/components/schemas/CustomPreset"}}
+                    favoritePromptPresetIds: {type: array, items: {type: string}}
+                    defaultPromptPresetId: {type: [string, "null"]}
+                    selectedModel: {type: string}
+                    autoIntelligence: {type: string}
+                    reasoningEffort: {type: string}
+                    thinkingEnabled: {type: boolean}
+                    webSearchEnabled: {type: boolean}
+                    webSearchAvailable: {type: boolean}
+                    piiCheckEnabled: {type: boolean}
+                    genUIEnabled: {type: boolean}
+                    pixelateSidebarChatTitlesEnabled: {type: boolean}
+                    browserTabChatTitleEnabled: {type: boolean}
+                    enterToNewlineEnabled: {type: boolean}
+                    readAloudSpeed: {type: number, minimum: 0.5, maximum: 2}
+                    hasSeenOnboarding: {type: boolean}
+                    hasSeenWebSearchIntro: {type: boolean}
+                    dismissed: {type: object, additionalProperties: {type: boolean}}
+                savePromptPresets: {type: array, items: {$ref: "#/components/schemas/CustomPreset"}, description: "要添加的已保存 prompt，每个都会按 id 替换存储中位于原处的那个。"}
+                updatePromptPresets: {type: array, items: {$ref: "#/components/schemas/PresetUpdate"}, description: "对已保存 prompt 的修改，在保存之后应用。每个都按 id 设置存储中的 prompt 上它所指明的成员；已不再存储的 prompt 保持删除状态。"}
+                deletePromptPresetIds: {type: array, items: {type: string}, description: "要移除的已保存 prompt。被移除的 prompt 不再是收藏，若它原是默认 prompt 则一并清除。"}
+                addFavoritePromptPresetIds: {type: array, items: {type: string}, description: "要添加到收藏末尾的 prompt，除非它们已是收藏。"}
+                removeFavoritePromptPresetIds: {type: array, items: {type: string}, description: "要从收藏中移除的 prompt。"}
+      responses:
+        "200": {$ref: "#/components/responses/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/profile/upgrade:
+    post:
+      operationId: profileUpgrade
+      summary: 转换旧客户端保留的设置
+      tags: [profile]
+      description: 把旧客户端在设备上保留的设置转换为当前 profile。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+      responses:
+        "200":
+          description: 作为 profile 的设置。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile]
+                properties:
+                  profile: {$ref: "#/components/schemas/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/profile/merge:
+    post:
+      operationId: profileMerge
+      summary: 把设备的设置合并进 profile
+      tags: [profile]
+      description: 在云端同步开启时，把设备的设置合并进账户的 profile。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+                changedFields: {type: array, items: {type: string}, description: "设备更改的字段，优先于账户的字段。"}
+      responses:
+        "200": {$ref: "#/components/responses/Profile"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/list:
+    post:
+      operationId: projectsList
+      summary: 列出 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                cursor: {type: string}
+                limit: {type: integer}
+      responses:
+        "200":
+          description: 账户 project 的一页。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects, nextCursor]
+                properties:
+                  projects: {type: array, items: {$ref: "#/components/schemas/Project"}}
+                  nextCursor: {type: string, description: "最后一页为空。"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/get:
+    post:
+      operationId: projectsGet
+      summary: 打开一个 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/KeyedId"}
+      responses:
+        "200":
+          description: project 及其 document。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, description, systemInstructions, color, documents]
+                properties:
+                  id: {type: string}
+                  name: {type: string}
+                  description: {type: string}
+                  systemInstructions: {type: string}
+                  color: {type: [string, "null"]}
+                  createdAt: {$ref: "#/components/schemas/Timestamp"}
+                  updatedAt: {$ref: "#/components/schemas/Timestamp"}
+                  documents: {type: array, items: {$ref: "#/components/schemas/ProjectDocument"}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/create:
+    post:
+      operationId: projectsCreate
+      summary: 创建一个 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                id: {$ref: "#/components/schemas/Identifier"}
+                name: {type: string}
+                description: {type: string}
+                systemInstructions: {type: string}
+                color: {type: [string, "null"]}
+      responses:
+        "200": {$ref: "#/components/responses/Project"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/update:
+    post:
+      operationId: projectsUpdate
+      summary: 修改一个 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                id: {$ref: "#/components/schemas/Identifier"}
+                name: {type: string}
+                description: {type: string}
+                systemInstructions: {type: string}
+                color: {type: [string, "null"]}
+      responses:
+        "200": {$ref: "#/components/responses/Project"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/delete:
+    post:
+      operationId: projectsDelete
+      summary: 删除一个 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/KeyedId"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/delete-all:
+    post:
+      operationId: projectsDeleteAll
+      summary: 删除所有 project
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Keyed"}
+      responses:
+        "200": {$ref: "#/components/responses/Deleted"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/documents/upload:
+    post:
+      operationId: projectDocumentUpload
+      summary: 向 project 添加一个 document
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, projectId]
+              properties:
+                file: {type: string, contentMediaType: application/octet-stream}
+                projectId: {type: string}
+                key: {type: string, description: "账户的 content key，base64 编码。"}
+      responses:
+        "200":
+          description: 已存储的 document。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProjectDocument"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/projects/documents/delete:
+    post:
+      operationId: projectDocumentDelete
+      summary: 从 project 移除一个 document
+      tags: [projects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [projectId, documentId]
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                projectId: {$ref: "#/components/schemas/Identifier"}
+                documentId: {$ref: "#/components/schemas/Identifier"}
+      responses:
+        "200": {$ref: "#/components/responses/Empty"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keys/current:
+    post:
+      operationId: keysCurrent
+      summary: 读取当前 content key
+      tags: [keys]
+      description: 账户当前 content key 的 id 及其 passkey bundle。
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200":
+          description: 当前的 key。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/KeyCurrent"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keys/register:
+    post:
+      operationId: keysRegister
+      summary: 注册一个 content key
+      tags: [keys]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, if_match, created_via, idempotency_key]
+              properties:
+                key: {type: string, description: "content key，base64 编码。"}
+                if_match: {type: string, description: "当前 key 的 etag，账户没有 key 时为 \"*\"。"}
+                created_via: {$ref: "#/components/schemas/KeyOrigin"}
+                idempotency_key: {type: string}
+                initial_bundle: {$ref: "#/components/schemas/KeyBundleInput"}
+      responses:
+        "200":
+          description: 已注册的 key。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, key_id]
+                properties:
+                  ok: {const: true}
+                  key_id: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keys/add-bundle:
+    post:
+      operationId: keysAddBundle
+      summary: 向 content key 添加一个 passkey bundle
+      tags: [keys]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential_id, kek_iv, encrypted_keys, key_id, key, idempotency_key]
+              properties:
+                credential_id: {type: string}
+                kek_iv: {type: string, description: "AES-GCM IV，hex 编码。"}
+                encrypted_keys: {type: string, description: "封装后的 content key，hex 编码。"}
+                key_id: {type: string}
+                key: {type: string, description: "content key，base64 编码。"}
+                idempotency_key: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/Ok"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keys/remove-bundle:
+    post:
+      operationId: keysRemoveBundle
+      summary: 从 content key 移除一个 passkey bundle
+      tags: [keys]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_id, key, credential_id, idempotency_key]
+              properties:
+                key_id: {type: string}
+                key: {type: string, description: "content key，base64 编码。"}
+                credential_id: {type: string}
+                idempotency_key: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/Ok"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keys/migrate-all:
+    post:
+      operationId: keysMigrateAll
+      summary: 在当前 key 下重新封存已存储数据
+      tags: [keys]
+      description: |
+        在后台把旧 key 封存的每一行都改以目标 key（必须是账户的注册 key）封存。
+        在 reseal 进行期间或它刚结束后不久发起的调用，会报告那次 reseal，
+        而不是再启动一次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys, target]
+              properties:
+                keys: {type: array, items: {$ref: "#/components/schemas/KeyRef"}}
+                target: {$ref: "#/components/schemas/KeyRef"}
+      responses:
+        "200":
+          description: 调用返回时 harness 关于 reseal 的报告。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ResealReport"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/attachments/upload:
+    post:
+      operationId: attachmentUpload
+      summary: 把文件转换为 attachment
+      tags: [attachments]
+      description: 把文件转换为 turn 发送的 attachment。harness 不保留它的任何内容。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, contentMediaType: application/octet-stream}
+      responses:
+        "200":
+          description: attachment。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attachment]
+                properties:
+                  attachment: {$ref: "#/components/schemas/Attachment"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/attachments/get:
+    post:
+      operationId: attachmentGet
+      summary: 下载一个 attachment
+      tags: [attachments]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AttachmentRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Bytes"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/attachments/get-public:
+    post:
+      operationId: attachmentGetPublic
+      summary: 下载已分享 chat 的 attachment
+      tags: [attachments]
+      description: 用分享所指明的 key 读取已分享 chat 的 attachment。
+      security: [{}, {identity: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AttachmentRequest"}
+      responses:
+        "200": {$ref: "#/components/responses/Bytes"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/transcriptions:
+    post:
+      operationId: transcriptions
+      summary: 转写一段录音
+      tags: [speech]
+      description: 两分钟内未完成转写的录音会以 UPSTREAM_REFUSED 失败。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, contentMediaType: application/octet-stream}
+      responses:
+        "200":
+          description: 录音的文本。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [text]
+                properties:
+                  text: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/speech:
+    post:
+      operationId: speech
+      summary: 朗读文本
+      tags: [speech]
+      description: 朗读一条 message 或客户端发送的文本。剔除代码、图片和裸链接后没有可读内容的文本会以 NOTHING_TO_READ 拒绝。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                local: {type: boolean}
+                thread: {$ref: "#/components/schemas/ThreadInput"}
+                profile: {$ref: "#/components/schemas/ProfileInput"}
+                threadId: {$ref: "#/components/schemas/Identifier"}
+                messageId: {$ref: "#/components/schemas/Identifier"}
+                text: {type: string, description: "未指明 message 时要朗读的文本，例如选区或已分享 chat 的 message。"}
+                speed: {type: number, minimum: 0.5, maximum: 2, description: "音频播放的快慢，以声音语速的倍数表示，音高不变。缺省为 1。"}
+      responses:
+        "200":
+          description: 音频，边生成边流式输出。
+          content:
+            audio/pcm:
+              schema: {type: string, contentMediaType: audio/pcm}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/import:
+    post:
+      operationId: import
+      summary: 导入一个归档
+      tags: [archives]
+      description: 导入一个归档，要么作为设备 chat 流式返回给客户端，要么通过 import job 存入云端。未登录调用方只能导入设备 chat，且归档至多 32 MiB，一次一个归档。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, contentMediaType: application/octet-stream}
+                options:
+                  type: string
+                  contentMediaType: application/json
+                  contentSchema:
+                    type: object
+                    properties:
+                      key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                      target: {type: string, enum: [device, cloud]}
+      responses:
+        "200":
+          description: 每个设备 chat 一行，然后是一行表示 import 完成的行。在第一行之后失败的 import 会以错误行结束。
+          content:
+            application/x-ndjson:
+              schema: {type: string}
+              x-item-schema: {$ref: "#/components/schemas/ImportLine"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/import/status:
+    post:
+      operationId: importStatus
+      summary: 读取 import job 的进度
+      tags: [archives]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId]
+              properties:
+                jobId: {$ref: "#/components/schemas/Identifier"}
+      responses:
+        "200":
+          description: import job 的进度。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ImportStatus"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export:
+    post:
+      operationId: export
+      summary: 把 chat 导出为归档
+      tags: [archives]
+      description: 把账户已存储的 chat 与客户端发送的设备 chat 导出为归档。存储服务无法提供的已存储 attachment 会被略去，归档的 manifest 会列出它，就像列出无法读取的已存储 chat 一样。未登录调用方只能导出设备 chat，且至多 32 MiB，一次一个归档。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                options:
+                  type: string
+                  contentMediaType: application/json
+                  contentSchema:
+                    type: object
+                    properties:
+                      key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+                      format: {type: string, enum: [native, conversations]}
+                thread: {type: array, items: {type: string, contentMediaType: application/json}, description: "设备 chat，每个分片一个。"}
+                file: {type: array, items: {type: string, contentMediaType: application/octet-stream}, description: "设备 chat 图片的原始文件。"}
+      responses:
+        "200":
+          description: 归档。
+          content:
+            application/zip:
+              schema: {type: string, contentMediaType: application/zip}
+            application/json:
+              schema: {type: string, contentMediaType: application/json}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/favicon:
+    post:
+      operationId: favicon
+      summary: 读取网站的 favicon
+      tags: [metadata]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PageRequest"}
+      responses:
+        "200":
+          description: 网站的 favicon，harness 按网站 host 从 DuckDuckGo 读取。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, description: "当网站有 favicon 时为 found。"}
+                  favicon_bytes: {type: string, description: "Base64 编码。"}
+                  favicon_content_type: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/image:
+    post:
+      operationId: remoteImage
+      summary: 在 enclave 内加载公开图片
+      tags: [metadata]
+      description: 不带调用方请求头或 cookie 抓取 HTTPS 图片，并返回 PNG 副本。私有目标、非标准端口、过多重定向、过大下载以及超过像素上限的图片都会被拒绝。动画会缩减为其第一帧。客户端绝不回退为直接下载该 URL。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PageRequest"}
+      responses:
+        "200":
+          description: 用于本地展示的图片字节。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RemoteImage"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/link:
+    post:
+      operationId: linkMetadata
+      summary: 读取页面的链接预览
+      tags: [metadata]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PageRequest"}
+      responses:
+        "200":
+          description: 页面的链接预览。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LinkPreview"}
+        default: {$ref: "#/components/responses/Error"}
+
+components:
+  parameters:
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      description: 客户端已应用的该 run 最后一个 event 的游标。流会从它之后继续；没有它则从 run 的第一个 event 开始；当 harness 不再持有后续 event 时，两者都会先发送一个 checkpoint。run 从未发送过的游标会被拒绝。
+      schema: {type: integer, minimum: 0}
+
+    HarnessInstance:
+      name: X-Tinfoil-Harness-Instance
+      in: header
+      description: run 的 RUN_STARTED 所指明的实例。部署多个 harness 时，会通过此请求头把关于该 run 的请求路由到它，它不携带调用方的任何信息。
+      schema: {type: string}
+
+  securitySchemes:
+    metricsAdmin:
+      type: http
+      scheme: bearer
+      description: 获授权访问 metrics.read 的 admin API key，由 shim 在线校验。
+    identity:
+      type: http
+      scheme: bearer
+      description: Clerk session token，或未登录调用方的 free_ key。session token 在过期后十分钟内仍被接受，因为携带 chat 的请求在慢连接上可能需要数分钟才能到达，但分享 chat、撤销其分享或读取分享状态除外，这些由 control plane 按 token 本身授权。未登录调用方关于已启动 run 的请求（follow、cancel，或发送、移除排在其后的 turn）会携带该 run 启动所用的 key，该 key 即使已过期也为其接受。
+    chatAccess:
+      type: apiKey
+      in: header
+      name: X-Tinfoil-Inference-Key
+      description: 客户端从 control plane mint 的 chat 访问权限，harness 在读取正文前会先对照身份校验它。用订阅者的 chat token 启动的 run 比该 token 更持久，朗读的 reply 也一样。只要 run 或朗读仍在继续，harness 就让 control plane 续期 token，因此客户端只为其发送的请求 mint chat 访问权限，从不为进行中的 run 或朗读 mint。
+  responses:
+
+    Error:
+      description: 一次拒绝。
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+
+    Empty:
+      description: 完成。
+      content:
+        application/json:
+          schema: {type: object}
+
+    Ok:
+      description: 完成。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok]
+            properties:
+              ok: {type: boolean}
+
+    Deleted:
+      description: 删除了多少行。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deleted]
+            properties:
+              deleted: {type: integer}
+
+    Bytes:
+      description: attachment 的字节。
+      content:
+        application/octet-stream:
+          schema: {type: string, contentMediaType: application/octet-stream}
+
+    RunEvents:
+      description: run 的 event。
+      content:
+        text/event-stream:
+          schema: {type: string}
+          x-item-schema: {$ref: "#/components/schemas/HarnessEvent"}
+
+    Session:
+      description: session。
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Session"}
+
+    ThreadWindow:
+      description: chat，从其最新 message 往回。
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ThreadWindow"}
+
+    ChangedThread:
+      description: 修改后的 chat。云端 chat 返回其最新 message，设备 chat 返回其新记录。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - {$ref: "#/components/schemas/ThreadWindow"}
+              - {$ref: "#/components/schemas/DeviceThreadReply"}
+
+    Profile:
+      description: profile。
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ProfileView"}
+
+    Project:
+      description: project。
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Project"}
+  schemas:
+
+    # --- Common ---------------------------------------------------------------
+
+    Json:
+      description: 任意 JSON 值。
+
+    JsonObject:
+      description: 拥有任意成员的 JSON 对象。
+      type: object
+      additionalProperties: true
+
+    Identifier:
+      description: 客户端为某行命名的 id。可打印 ASCII，不含 / \ ? 或 #，且不是 "." 或 ".."。
+      type: string
+      minLength: 1
+      maxLength: 128
+
+    Timestamp:
+      description: UTC 时间的 RFC 3339 时间。
+      type: string
+
+    Keyed:
+      type: object
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+
+    KeyedId:
+      type: object
+      required: [id]
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        id: {$ref: "#/components/schemas/Identifier"}
+
+    ThreadIdRequest:
+      type: object
+      required: [threadId]
+      properties:
+        threadId: {$ref: "#/components/schemas/Identifier"}
+
+    PageRequest:
+      type: object
+      required: [url]
+      properties:
+        url: {type: string}
+
+    RemoteImage:
+      type: object
+      required: [image_bytes, image_content_type]
+      properties:
+        image_bytes: {type: string, description: "Base64 编码的 PNG，编码前不超过 8 MiB。"}
+        image_content_type: {type: string, const: "image/png"}
+
+    # --- Errors ---------------------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: {$ref: "#/components/schemas/ErrorBody"}
+
+    ErrorBody:
+      description: |
+        请求或 run 失败的原因。客户端可以按自己的方式处理它认识的 code，
+        并对其余每个 code 按其 action 处理，因此客户端发布之后新增的 code
+        也能得到处理。
+      type: object
+      required: [code, message, action]
+      properties:
+        code: {$ref: "#/components/schemas/ErrorCode"}
+        message: {type: string, description: "面向日志和开发者的英文说明。客户端根据 code 和 action 决定向用户展示什么。"}
+        action: {$ref: "#/components/schemas/ErrorAction"}
+        kind: {type: string, description: "对于 QUOTA_EXHAUSTED，quota 的种类：free_daily 或 hourly。"}
+        retryAfter: {type: integer, description: "重试前等待的秒数。"}
+        resetsAt: {$ref: "#/components/schemas/Timestamp"}
+        status: {type: integer, description: "下游服务应答所用的状态码。"}
+        keyId: {type: string, description: "对于 KEY_MISMATCH，已存储数据所用 key 的 id。"}
+        upstreamCode: {type: string, description: "对于转换失败的 document，转换器给出的 document_* 错误码。"}
+        rateLimit: {$ref: "#/components/schemas/RateLimit"}
+
+    ErrorAction:
+      description: |
+        客户端对它没有自带处理方式的错误所采取的动作。
+        action 为客户端所不认识的错误会使请求失败：客户端展示该错误，
+        且不再提供其他任何选项。
+
+        - reauthenticate：刷新调用方的身份与 chat 访问权限，并再发送一次
+          请求，且不告知用户。若再次被拒绝，则请用户登录。
+        - reload：客户端所持有的 chat 或 run 副本已过时。重新读取并展示，
+          且不告知用户。
+        - retry：原样重新发送请求可能会成功。若给出了 retryAfter，先等待
+          其秒数。客户端可以自行重新发送不启动任何 run 的请求；对于失败的
+          turn，则提供给用户重试。
+        - wait：某种 quota 已用尽，直到 resetsAt。告诉用户何时可以继续，
+          在此之前不要发送受其限制的任何内容。
+        - unlock：请求需要账户的 content key，而本设备没有它，或只持有
+          旧副本。请用户解锁或找回它。
+        - revise：请求按原样无法成功。告诉用户需要改什么，例如更小的文件、
+          换一个文件或模型，或更短的 chat。
+        - stop：现在客户端或用户做什么都无法使请求成功。告知用户，
+          且不再提供重试。
+      anyOf:
+        - {type: string, enum: [reauthenticate, reload, retry, wait, unlock, revise, stop]}
+        - {type: string}
+
+    ErrorCode:
+      description: 客户端按错误的 action 处理它不认识的 code。
+      anyOf:
+        - type: string
+          enum:
+            - ALREADY_APPLIED
+            - ARCHIVE_TOO_LARGE
+            - ATTACHMENT_TOO_LARGE
+            - ATTACHMENT_UNSUPPORTED
+            - ATTACHMENTS_UNAVAILABLE
+            - BAD_REQUEST
+            - BROWSER_TIMEOUT
+            - CHAT_FLAGGED
+            - COMPACTION_FAILED
+            - CONTEXT_TOO_LARGE
+            - CREDENTIAL_REQUIRED
+            - IMPORT_INVALID
+            - IMPORT_TOO_LARGE
+            - KEY_MISMATCH
+            - KEY_REQUIRED
+            - MAX_TURNS
+            - MISSING_ATTACHMENT
+            - MODEL_UNAVAILABLE
+            - NOTHING_TO_COMPACT
+            - NOTHING_TO_READ
+            - PAYLOAD_TOO_LARGE
+            - PROJECTS_REQUIRE_CLOUD
+            - QUEUE_FULL
+            - QUOTA_EXHAUSTED
+            - RATE_LIMITED
+            - RECORD_UNSUPPORTED
+            - RESEARCH_LIMIT_REACHED
+            - REQUEST_TIMEOUT
+            - REVISION_CONFLICT
+            - RUN_IN_FLIGHT
+            - RUN_LOG_FULL
+            - RUN_NOT_FOUND
+            - SEARCH_INDEX_FAILED
+            - SERVICE_BUSY
+            - SYNC_OUTCOME_UNKNOWN
+            - TEMP_SPACE_BUSY
+            - THREAD_EXISTS
+            - THREAD_NOT_FOUND
+            - THREAD_TOO_LARGE
+            - TOOL_UNAVAILABLE
+            - UNAUTHENTICATED
+            - UPSTREAM_REFUSED
+        - {type: string}
+
+    # --- Session --------------------------------------------------------------
+
+    Session:
+      type: object
+      required: [protocol, user, rateLimit, models, auto, defaultModel, widgets, profileDefaults, composer, presets, features]
+      properties:
+        protocol:
+          description: harness 所使用的本文档版本。客户端按它构建自的文档的 info.version 得知自己的版本。
+          type: object
+          required: [version, minimum]
+          properties:
+            version: {type: integer, description: "本 harness 所使用的版本。"}
+            minimum: {type: integer, description: "本 harness 仍为之服务的最旧版本的客户端。基于更旧版本构建的客户端会提示用户更新。"}
+        user:
+          type: object
+          required: [id, anonymous]
+          properties:
+            id: {type: string, description: "未登录调用方为空。"}
+            anonymous: {type: boolean}
+        rateLimit: {$ref: "#/components/schemas/RateLimit"}
+        models: {type: array, items: {$ref: "#/components/schemas/SessionModel"}}
+        auto:
+          description: Auto 的工作强度、其默认等级以及各等级的标签。
+          type: object
+          required: [default, levels]
+          properties:
+            default: {type: string}
+            levels:
+              type: array
+              items:
+                type: object
+                required: [id, label, displayLabel]
+                properties:
+                  id: {type: string}
+                  label: {type: string}
+                  displayLabel: {type: string}
+        defaultModel: {type: string}
+        widgets: {type: array, items: {type: string}, description: "turn 可以向模型提供的 widget。"}
+        profileDefaults: {$ref: "#/components/schemas/Profile"}
+        composer: {$ref: "#/components/schemas/Composer"}
+        presets: {type: array, items: {$ref: "#/components/schemas/Preset"}}
+        features:
+          description: 本 harness 提供的可选行为。客户端只在某 feature 此处为 true 时才按其行事。compaction 为 true 表示：当某 chat 的 prompt 会超过其模型窗口时，会被压缩而不是拒绝。manualCompaction 为 true 表示：kind 为 compact 的 turn 会应请求压缩 chat。compactLatest 为 true 表示：这类 turn 在发送 compactLatest 时，也会概括该 chat 最近的一轮交流。research 为 true 表示：该调用方可以发送带 options.research 的 turn，而只有订阅者可以。partialThread 为 true 表示：客户端可以从最新 compaction 标记起发送设备 chat，如 ThreadInput 所述。
+          type: object
+          additionalProperties: {type: boolean}
+
+    SessionModel:
+      type: object
+      required: [id, label, shortLabel, icon, description, badges, reasoning, deprecated]
+      properties:
+        id: {type: string}
+        label: {type: string}
+        shortLabel: {type: string}
+        icon: {type: string}
+        description: {type: string}
+        badges:
+          type: array
+          items:
+            type: object
+            required: [kind, label, tooltip]
+            properties:
+              kind:
+                description: 客户端不展示它不认识的 kind 的 badge。
+                anyOf:
+                  - {type: string, enum: [experimental, deprecated]}
+                  - {type: string}
+              label: {type: string}
+              tooltip: {type: string}
+        reasoning:
+          type: [object, "null"]
+          required: [toggle, effort, defaultEnabled]
+          properties:
+            toggle: {type: boolean}
+            effort: {type: boolean}
+            defaultEnabled: {type: boolean}
+        deprecated: {type: boolean}
+        auto: {type: boolean, description: "让 router 为每个 turn 选择模型的条目。"}
+
+    Preset:
+      type: object
+      required: [id, name, description, systemPrompt, icon, builtIn]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        systemPrompt: {type: string}
+        icon: {type: string}
+        builtIn: {type: boolean}
+
+    Composer:
+      description: 输入框所能接受的内容。
+      type: object
+      required: [attachments, projectDocuments, pasteAsFileChars, dictationMaxSeconds, dictationSegmentSeconds]
+      properties:
+        attachments: {type: array, items: {$ref: "#/components/schemas/FileGroup"}}
+        projectDocuments: {type: array, items: {$ref: "#/components/schemas/FileGroup"}}
+        pasteAsFileChars: {type: integer}
+        dictationMaxSeconds: {type: integer, description: "把语音输入作为单段录音发送的客户端允许其持续的最长时间。"}
+        dictationSegmentSeconds: {type: integer, description: "客户端在把已录内容送去转写并继续录音前允许语音输入持续的时间：它会在到达该时长后的第一个停顿处结束每段录音。短录音数秒内即可转写，失败的录音最多只损失其自身。"}
+
+    FileGroup:
+      description: 输入框按扩展名接受的各类文件，以及每类允许的最大大小。
+      type: object
+      required: [accept, maxBytes]
+      properties:
+        accept: {type: array, items: {type: string}}
+        maxBytes: {type: integer}
+        imageMaxSide: {type: integer}
+
+    RateLimit:
+      description: free key 的每日请求 quota，或订阅者的每小时 token 预算。
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          description: 客户端不展示它不认识的 kind 的 quota。
+          anyOf:
+            - {type: [string, "null"], enum: [free_daily, hourly, null]}
+            - {type: string}
+        maxRequests: {type: integer}
+        remaining: {type: integer}
+        resetsAt: {$ref: "#/components/schemas/Timestamp"}
+        inputTokens: {$ref: "#/components/schemas/TokenBudget"}
+        outputTokens: {$ref: "#/components/schemas/TokenBudget"}
+
+    TokenBudget:
+      type: object
+      required: [max, used, remaining]
+      properties:
+        max: {type: integer}
+        used: {type: integer}
+        remaining: {type: integer}
+
+    # --- Turns and runs -------------------------------------------------------
+
+    Turn:
+      description: 对 chat 的一次用户操作，由其 run 执行。
+      type: object
+      required: [clientRequestId, threadId]
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        clientRequestId: {type: string, format: uuid, description: "一个 nonce。用它再次发送的 turn 会得到它所启动的 run 的应答。"}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        kind:
+          type: string
+          enum: [send, edit, regenerate, continue, retry, retryToolCall, ask, compact]
+          description: |
+            send 时缺省。
+
+            compact 应请求压缩 chat，如 COMPACTION_START 所述，且不向模型
+            提出任何问题：其 run 发送该压缩并结束。当 chat 最新 compaction
+            标记之后、其最后一个 question 之前没有任何 message 时，会以
+            NOTHING_TO_COMPACT 拒绝；当它发送 compactLatest 时，若该标记
+            之后没有任何 reply，也会以 NOTHING_TO_COMPACT 拒绝。当 chat 有
+            正在运行的 reply 时，会以 RUN_IN_FLIGHT 拒绝。compact turn 失败
+            后的 retry 会再次压缩。客户端只在 session 的
+            features.manualCompaction 为 true 时才发送它。
+        ephemeral: {type: boolean, description: "从不存储的 ask。"}
+        local: {type: boolean, description: "该 chat 保存在设备上，设备把它作为 thread 发送。"}
+        thread: {$ref: "#/components/schemas/ThreadInput"}
+        profile: {$ref: "#/components/schemas/ProfileInput"}
+        projectId: {type: [string, "null"]}
+        presetId: {type: [string, "null"]}
+        content: {type: string, description: "不带 content、quote 或 attachment 的 send 只发送用户自其上一个 question 以来更改的 answer；若没有则被拒绝。"}
+        quote: {type: string}
+        messageId: {type: string, description: "edit、regenerate、continue 或 retry 所作用的 message。"}
+        toolCallId: {type: string, description: "retryToolCall 重新生成的 widget 调用。"}
+        attachments: {type: array, items: {$ref: "#/components/schemas/SentAttachment"}}
+        widgets: {type: array, items: {type: string}, description: "本客户端渲染的 widget。"}
+        browser: {$ref: "#/components/schemas/BrowserAccess"}
+        compactLatest: {type: boolean, description: "compact turn 或再次压缩的 retry 也会概括该 chat 最近的一轮交流，如 COMPACTION_START 所述。它在任何其他 kind 上都会被拒绝。客户端只在 session 的 features.compactLatest 为 true、且它在 chat 末尾展示 compaction 标记时才发送它。"}
+        options: {$ref: "#/components/schemas/TurnOptions"}
+
+    BrowserAccess:
+      description: |
+        仅当 features.browserTools 为 true 时可用，用于不带 research 的 local
+        send turn。客户端控制所选标签页，并为每个 turn 提供新的 executor
+        身份和 secret。token 只通过封存正文发送，绝不进入 prompt、event 或
+        持久化的 chat 记录。browser action 顺序执行，每个 turn 至多 40 个。
+        每个最多等待其 executor 五分钟；超时会以 BROWSER_TIMEOUT 结束该 run，
+        并让后续 action 不再执行。客户端在放弃浏览器控制时会 cancel 该 run，
+        并立即停止本地派发。
+      type: object
+      required: [executorId, token]
+      properties:
+        executorId: {type: string, format: uuid}
+        token: {type: string, pattern: "^[0-9a-f]{64}$"}
+
+    BrowserAction:
+      description: 按面向模型的浏览器工具 schema 校验的参数。executor 在派发前还会额外校验已选中的标签页、URL scheme、当前引用以及 action 权限。
+      type: object
+      required: [action]
+      properties:
+        action: {type: string, enum: [tabs, read, screenshot, click, hover, fill, select, press, scroll, navigate, back, forward, open, switch, close, wait]}
+        tabId: {type: integer}
+        ref: {type: string}
+        text: {type: string}
+        url: {type: string}
+        key: {type: string, enum: [Enter, Tab, Escape, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace]}
+        direction: {type: string, enum: [up, down]}
+        screenshotId: {type: string, description: "坐标类 action 所用像素取自的最新截图。"}
+        x: {type: number, minimum: 0}
+        y: {type: number, minimum: 0}
+
+    BrowserResult:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, maxLength: 65536, description: "页面数据或结构化的 action 错误。限 64 KiB UTF-8。"}
+        image: {type: string, maxLength: 2097152, description: "可选的 base64 JPEG 视口，至多 400 万像素。仅供 vision 模型读取。"}
+
+    BrowserResultInput:
+      type: object
+      required: [threadId, runId, executorId, token, executionId, result]
+      properties:
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        runId: {type: string}
+        executorId: {type: string}
+        token: {type: string}
+        executionId: {type: string}
+        result: {$ref: "#/components/schemas/BrowserResult"}
+
+    BrowserToolRequestEvent:
+      description: |
+        一个完整、校验通过、可供所选 executor 执行的浏览器操作。
+        只有该 event 才授权派发，绝不通过不完整的 TOOL_CALL_ARGS 授权。
+        executionId 在流重连之间标识该操作。
+        每次重放都会与 executor 本地的 journal 对账。
+      type: object
+      required: [type, executionId, toolCallId, executorId, expiresAt, operation]
+      properties:
+        type: {const: BROWSER_TOOL_REQUEST}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        expiresAt: {type: string, format: date-time, description: "executor 在此期限后拒绝派发，包括延迟审查或流重放之后。"}
+        executionId: {type: string}
+        toolCallId: {type: string}
+        executorId: {type: string}
+        operation: {$ref: "#/components/schemas/BrowserAction"}
+
+    TurnOptions:
+      type: object
+      properties:
+        model: {type: string}
+        autoIntelligence: {type: string}
+        reasoningEffort: {type: string}
+        timezone: {type: string}
+        locale: {type: string}
+        thinking: {type: boolean}
+        webSearch: {type: boolean}
+        piiCheck: {type: boolean}
+        genUI: {type: boolean}
+        research:
+          type: boolean
+          description: |
+            turn 会在回答前对它的 question 在网络上进行较长时间的 research，
+            最长约半小时，然后以一份 report 作答。客户端只在 session 的
+            features.research 为 true 时、且只在 send、edit、regenerate 或
+            retry 上发送它。
+
+            无论该 chat 的联网搜索设置如何，该 run 都会搜索网络；当设置关闭
+            联网搜索时，会以 TOOL_UNAVAILABLE 拒绝。调用方每小时只能开始一次
+            research：在上一次 research 开始后一小时内发送的 turn，会以
+            RESEARCH_LIMIT_REACHED 拒绝，并附带下一次可以开始的 resetsAt。
+            当 turn 的 widgets 指明 questions widget 时，research 的第一个模型
+            turn 可能改为用该 widget 询问用户需要了解什么，然后该 run 结束；
+            这样的 run 不计入该小时的 research，research 会在下一次回答这些
+            问题的 send（不带本选项）时开始。
+
+            该 turn 的 question 会以 research 存储，因此客户端可以显示它要求了
+            深度 research。对这类 question 的 edit、regenerate 或 retry 会不带
+            本选项地再次 research 它，而 continue 则不带 research 地接着其
+            report 继续。
+
+            在 research 期间，模型在其工具调用之间所写的内容会作为 reasoning
+            流式输出，伴随其 web_search 与 web_fetch 调用。当 turn 的 widgets
+            指明 render_artifact_preview 时，模型随后会以 Markdown 在该 widget
+            中写出其 report，reply 的文本则说明它发现了什么；否则只有其 report
+            作为 reply 的文本流式输出。reply 会以 research 提交，后续 turn
+            只把它作为其 report 来读取。
+        cacheSecret:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: 客户端持有的 256 个随机位，hex 编码，用于把模型 enclave 的 prompt cache 限定到该客户端。没有它的 turn 只在各自的 chat 内共享 cache。
+
+    SentAttachment:
+      description: 上传的 attachment 按 turn 发回的形式，或仅 chat 已持有的某个 attachment 的 id。
+      type: object
+      required: [id]
+      properties:
+        id: {$ref: "#/components/schemas/Identifier"}
+        kind: {$ref: "#/components/schemas/AttachmentKind"}
+        fileName: {type: string}
+        mimeType: {type: string}
+        size: {type: integer}
+        thumbnail: {type: string}
+        textContent: {type: string}
+        description: {type: string}
+        pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
+        base64: {type: string}
+
+    FollowInput:
+      type: object
+      required: [threadId, runId]
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        runId: {type: string}
+
+    RunRequest:
+      description: chat 的一个 run，或排在某 run 后面的 turn。
+      type: object
+      required: [threadId]
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        runId: {type: string}
+        queueId: {type: string}
+
+    HarnessEvent:
+      description: run 的一个 event。
+      oneOf:
+        - {$ref: "#/components/schemas/RunStartedEvent"}
+        - {$ref: "#/components/schemas/MessagesSnapshotEvent"}
+        - {$ref: "#/components/schemas/StateSnapshotEvent"}
+        - {$ref: "#/components/schemas/StateDeltaEvent"}
+        - {$ref: "#/components/schemas/TextMessageChunkEvent"}
+        - {$ref: "#/components/schemas/ReasoningMessageChunkEvent"}
+        - {$ref: "#/components/schemas/ReasoningSummaryEvent"}
+        - {$ref: "#/components/schemas/ToolCallStartEvent"}
+        - {$ref: "#/components/schemas/ToolCallArgsEvent"}
+        - {$ref: "#/components/schemas/ToolCallEndEvent"}
+        - {$ref: "#/components/schemas/ToolCallResultEvent"}
+        - {$ref: "#/components/schemas/BrowserToolRequestEvent"}
+        - {$ref: "#/components/schemas/ActivitySnapshotEvent"}
+        - {$ref: "#/components/schemas/ActivityDeltaEvent"}
+        - {$ref: "#/components/schemas/CompactionStartEvent"}
+        - {$ref: "#/components/schemas/CompactionEndEvent"}
+        - {$ref: "#/components/schemas/RunFinishedEvent"}
+        - {$ref: "#/components/schemas/RunErrorEvent"}
+      discriminator:
+        propertyName: type
+        mapping:
+          RUN_STARTED: "#/components/schemas/RunStartedEvent"
+          MESSAGES_SNAPSHOT: "#/components/schemas/MessagesSnapshotEvent"
+          STATE_SNAPSHOT: "#/components/schemas/StateSnapshotEvent"
+          STATE_DELTA: "#/components/schemas/StateDeltaEvent"
+          TEXT_MESSAGE_CHUNK: "#/components/schemas/TextMessageChunkEvent"
+          REASONING_MESSAGE_CHUNK: "#/components/schemas/ReasoningMessageChunkEvent"
+          REASONING_SUMMARY: "#/components/schemas/ReasoningSummaryEvent"
+          TOOL_CALL_START: "#/components/schemas/ToolCallStartEvent"
+          TOOL_CALL_ARGS: "#/components/schemas/ToolCallArgsEvent"
+          TOOL_CALL_END: "#/components/schemas/ToolCallEndEvent"
+          TOOL_CALL_RESULT: "#/components/schemas/ToolCallResultEvent"
+          BROWSER_TOOL_REQUEST: "#/components/schemas/BrowserToolRequestEvent"
+          ACTIVITY_SNAPSHOT: "#/components/schemas/ActivitySnapshotEvent"
+          ACTIVITY_DELTA: "#/components/schemas/ActivityDeltaEvent"
+          COMPACTION_START: "#/components/schemas/CompactionStartEvent"
+          COMPACTION_END: "#/components/schemas/CompactionEndEvent"
+          RUN_FINISHED: "#/components/schemas/RunFinishedEvent"
+          RUN_ERROR: "#/components/schemas/RunErrorEvent"
+
+    RunStartedEvent:
+      description: 打开一个 run。续接会指明它流入的 reply。
+      type: object
+      required: [type, threadId, runId, instance]
+      properties:
+        type: {const: RUN_STARTED}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        threadId: {type: string}
+        runId: {type: string}
+        instance: {type: string, description: "持有该 run 的实例，关于该 run 的请求会把它作为 X-Tinfoil-Harness-Instance 发送。"}
+        messageId: {type: string}
+
+    MessagesSnapshotEvent:
+      description: run 开始时该 chat 的最新 message。
+      type: object
+      required: [type, messages, hasOlder]
+      properties:
+        type: {const: MESSAGES_SNAPSHOT}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messages: {type: array, items: {$ref: "#/components/schemas/MessageView"}}
+        hasOlder: {type: boolean}
+
+    StateSnapshotEvent:
+      type: object
+      required: [type, snapshot]
+      properties:
+        type: {const: STATE_SNAPSHOT}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        snapshot:
+          description: 该 run 的 chat、其队列以及调用方的 quota。
+          type: object
+          required: [thread, queue, rateLimit]
+          properties:
+            thread: {$ref: "#/components/schemas/ThreadSummary"}
+            queue: {type: array, items: {$ref: "#/components/schemas/QueueItem"}}
+            rateLimit: {$ref: "#/components/schemas/RateLimit"}
+
+    StateDeltaEvent:
+      description: 对 run 状态的变更。指明某个 run 的变更，是关于排在该正在运行的 reply 后面的 turn 的。
+      type: object
+      required: [type, delta]
+      properties:
+        type: {const: STATE_DELTA}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        threadId: {type: string}
+        runId: {type: string}
+        delta: {type: array, items: {$ref: "#/components/schemas/StatePatch"}}
+
+    StatePatch:
+      oneOf:
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: add}
+            path: {const: /queue/-}
+            value: {$ref: "#/components/schemas/QueueItem"}
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: replace}
+            path: {const: /queue}
+            value: {type: array, items: {$ref: "#/components/schemas/QueueItem"}}
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: replace}
+            path: {const: /thread/title}
+            value: {type: string}
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: replace}
+            path: {const: /thread/titleState}
+            value: {$ref: "#/components/schemas/TitleState"}
+
+    QueueItem:
+      description: 排在其 chat 正在运行的 reply 后面的 turn。结束的 run 会列出其后开始的 turn，直到该 turn 的 run 启动。
+      type: object
+      required: [queueId, kind, content, quote, attachments, createdAt]
+      properties:
+        queueId: {type: string}
+        kind: {type: string}
+        content: {type: [string, "null"]}
+        quote: {type: [string, "null"]}
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              kind: {$ref: "#/components/schemas/AttachmentKind"}
+              fileName: {type: string}
+              mimeType: {type: string}
+              size: {type: integer}
+              thumbnail: {type: string}
+        createdAt: {$ref: "#/components/schemas/Timestamp"}
+
+    TextMessageChunkEvent:
+      type: object
+      required: [type, messageId, role, delta]
+      properties:
+        type: {const: TEXT_MESSAGE_CHUNK}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        role: {const: assistant}
+        delta: {type: string}
+
+    ReasoningMessageChunkEvent:
+      description: 流式写入 reply 的 reasoning。其 messageId 为该 reply 的 messageId 后接 "-reasoning"。
+      type: object
+      required: [type, messageId, delta]
+      properties:
+        type: {const: REASONING_MESSAGE_CHUNK}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        delta: {type: string}
+
+    ReasoningSummaryEvent:
+      description: reasoning block 进行中的简短摘要。它不会与 chat 一起存储。
+      type: object
+      required: [type, messageId, blockId, content]
+      properties:
+        type: {const: REASONING_SUMMARY}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        blockId: {type: string}
+        content: {type: string}
+
+    ToolCallStartEvent:
+      type: object
+      required: [type, toolCallId, toolCallName]
+      properties:
+        type: {const: TOOL_CALL_START}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        toolCallId: {type: string}
+        toolCallName: {type: string}
+        parentMessageId: {type: string}
+
+    ToolCallArgsEvent:
+      type: object
+      required: [type, toolCallId, delta]
+      properties:
+        type: {const: TOOL_CALL_ARGS}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        toolCallId: {type: string}
+        delta: {type: string}
+
+    ToolCallEndEvent:
+      type: object
+      required: [type, toolCallId]
+      properties:
+        type: {const: TOOL_CALL_END}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        toolCallId: {type: string}
+
+    ToolCallResultEvent:
+      type: object
+      required: [type, messageId, toolCallId, role, content]
+      properties:
+        type: {const: TOOL_CALL_RESULT}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        toolCallId: {type: string}
+        role: {const: tool}
+        content: {$ref: "#/components/schemas/Json"}
+        metadata: {$ref: "#/components/schemas/JsonObject"}
+        display: {$ref: "#/components/schemas/ToolDisplay"}
+
+    ActivitySnapshotEvent:
+      description: 打开 tool 运行时的输出。其 messageId 为该调用 id 前加 "act_"。
+      type: object
+      required: [type, messageId, activityType, content]
+      properties:
+        type: {const: ACTIVITY_SNAPSHOT}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        activityType: {const: TOOL}
+        content: {$ref: "#/components/schemas/ToolActivity"}
+        display: {$ref: "#/components/schemas/ToolDisplay"}
+
+    ActivityDeltaEvent:
+      type: object
+      required: [type, messageId, activityType, patch]
+      properties:
+        type: {const: ACTIVITY_DELTA}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        activityType: {const: TOOL}
+        patch: {type: array, items: {$ref: "#/components/schemas/ActivityPatch"}}
+        display: {$ref: "#/components/schemas/ToolDisplay"}
+
+    ToolActivity:
+      description: tool 运行时的输出、其进度以及它打印的行。
+      type: object
+      required: [toolCallId, tool, progress, output]
+      properties:
+        toolCallId: {type: string}
+        tool: {type: string}
+        progress: {type: number}
+        output: {type: array, items: {$ref: "#/components/schemas/Json"}}
+
+    ActivityPatch:
+      oneOf:
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: replace}
+            path: {const: /progress}
+            value: {type: number}
+        - type: object
+          required: [op, path, value]
+          properties:
+            op: {const: add}
+            path: {const: /output/-}
+            value: {type: string}
+
+    CompactionStartEvent:
+      description: |
+        在摘要写出的同时打开一个 compaction 标记。若某 turn 的 prompt 放不进
+        模型窗口允许 prompt 填充的份额，就把从该 chat 最新标记起的 message
+        概括进一个新标记，但它 question 之前最近几轮交流除外，模型会继续按
+        原样读取它们。该标记位于它所保留的第一个 question 之前，或该 turn 的
+        question 之前。一个 run 至多压缩一次，在其第一个模型 turn 之前或两个
+        模型 turn 之间。compact turn 以同样方式压缩它的 chat，把该 chat 的
+        最后一个 question 及其之后的内容作为该 turn 的 question。带
+        compactLatest 的 turn 则改为概括从该 chat 最新标记起直到其最后一条
+        reply 的每条 message，其标记位于该 reply 之后：没有 reply 的 question
+        之前，否则位于 chat 末尾。beforeMessageId 指明该 run 的
+        MESSAGES_SNAPSHOT 中的某条 message，若标记位于 chat 末尾则为空。
+        客户端在该 message 之前（或在该 chat 最后一条 message 之后）展示该
+        标记，并把其前面的 message 展示为模型不再读取的内容。
+      type: object
+      required: [type, messageId, beforeMessageId]
+      properties:
+        type: {const: COMPACTION_START}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        beforeMessageId: {type: string}
+
+    CompactionEndEvent:
+      description: 关闭一个 compaction 标记，它位于 beforeMessageId 所放置的位置，正如 COMPACTION_START 放置它那样。已完成的标记会携带该 marker，即使 reply 随后失败，chat 也会保留它，其后会跟一个 STATE_SNAPSHOT，其中包含该 turn 的 prompt 现在所填充的上下文。客户端会移除失败的标记，之后 run 以 COMPACTION_FAILED 结束。
+      type: object
+      required: [type, messageId, beforeMessageId, outcome]
+      properties:
+        type: {const: COMPACTION_END}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        messageId: {type: string}
+        beforeMessageId: {type: string}
+        outcome:
+          description: 客户端把它不认识的 outcome 视为 failed。
+          anyOf:
+            - {type: string, enum: [completed, failed]}
+            - {type: string}
+        marker: {$ref: "#/components/schemas/MessageView"}
+
+    RunFinishedEvent:
+      type: object
+      required: [type, threadId, runId, metadata]
+      properties:
+        type: {const: RUN_FINISHED}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        threadId: {type: string}
+        runId: {type: string}
+        metadata: {$ref: "#/components/schemas/RunMetadata"}
+
+    RunErrorEvent:
+      description: 结束一个失败的 run，并携带 ErrorBody 的成员。run 丢失后流随之结束的那一个，既不明指 chat 也不明指 run。
+      type: object
+      required: [type, code, message, action]
+      properties:
+        type: {const: RUN_ERROR}
+        timestamp: {$ref: "#/components/schemas/Timestamp"}
+        threadId: {type: string}
+        runId: {type: string}
+        code: {$ref: "#/components/schemas/ErrorCode"}
+        message: {type: string}
+        action: {$ref: "#/components/schemas/ErrorAction"}
+        kind: {type: string}
+        retryAfter: {type: integer}
+        resetsAt: {$ref: "#/components/schemas/Timestamp"}
+        status: {type: integer}
+        keyId: {type: string}
+        upstreamCode: {type: string}
+        rateLimit: {$ref: "#/components/schemas/RateLimit"}
+        metadata: {$ref: "#/components/schemas/RunMetadata"}
+
+    RunMetadata:
+      description: run 的最后一个 event 所报告的内容。设备 chat 的 run 返回整个 chat，或从客户端发送它所用的 compaction 标记起的 chat，如 ThreadInput 所述。
+      type: object
+      properties:
+        messages: {type: array, items: {$ref: "#/components/schemas/CommittedReply"}}
+        thread: {$ref: "#/components/schemas/ThreadRecord"}
+        usage:
+          type: object
+          required: [prompt_tokens, completion_tokens, total_tokens]
+          properties:
+            prompt_tokens: {type: integer}
+            completion_tokens: {type: integer}
+            total_tokens: {type: integer}
+        rateLimit: {$ref: "#/components/schemas/RateLimit"}
+        cancelled: {type: boolean}
+        truncated: {type: boolean, description: "模型填满了其窗口留给该 run 的 reply 的空间，使其在此结束。reply 以中断状态提交，因此 continue turn 会从它停止处继续；客户端在展示 run 结束时可以说明它为何停止。"}
+
+    CommittedReply:
+      description: run 在 reply 流式内容之外提交的内容。
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        model: {type: string}
+        modelDisplayName: {type: string}
+        usage: {$ref: "#/components/schemas/MessageUsage"}
+        isError: {type: boolean}
+        isInterrupted: {type: boolean}
+        annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
+        research: {$ref: "#/components/schemas/Research"}
+
+    # --- Threads --------------------------------------------------------------
+
+    TitleState:
+      description: chat 的 title 是如何得来的。客户端会原样展示它不认识的状态的 title。
+      anyOf:
+        - {type: string, enum: [placeholder, generated, manual]}
+        - {type: string}
+
+    ContextUsage:
+      description: 该 chat 的上一个 prompt 填充了模型窗口允许 prompt 填充份额中的多少。超过该份额的 prompt 会压缩该 chat，之后 run 会报告其 prompt 那时填充了多少。
+      type: object
+      required: [usedTokens, limitTokens, percentage]
+      properties:
+        usedTokens: {type: integer}
+        limitTokens: {type: integer}
+        percentage: {type: number}
+
+    ThreadSummary:
+      description: 列表中所展示形式的 chat。
+      type: object
+      required: [id, title, titleState, createdAt, updatedAt, activityAt, projectId, model, webSearchEnabled, pinned, contextUsage, activeRun, messageCount]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        titleState: {$ref: "#/components/schemas/TitleState"}
+        createdAt: {type: [string, "null"]}
+        updatedAt: {type: [string, "null"]}
+        activityAt: {type: string, description: "该 chat 最新 message 的写入时间。"}
+        projectId: {type: [string, "null"]}
+        model: {type: string}
+        webSearchEnabled: {type: boolean}
+        pinned: {type: boolean}
+        contextUsage:
+          description: "该 chat 的上一个 prompt 填充了模型窗口的多少。"
+          type: [object, "null"]
+          required: [usedTokens, limitTokens, percentage]
+          properties:
+            usedTokens: {type: integer}
+            limitTokens: {type: integer}
+            percentage: {type: number}
+        activeRun:
+          description: "提示 reply 可能正在流式输出，直到该 run 的截止时间。它绝不会锁住该 chat。"
+          type: [object, "null"]
+          required: [runId, expiresAt, instance]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "持有该 run 的实例，客户端在 reload 后 follow 或取消它时会把它作为 X-Tinfoil-Harness-Instance 发送。"}
+        messageCount: {type: integer}
+        flagged: {type: boolean, description: "safeguards 标记了该 chat，它不再接收更多 turn。"}
+
+    ThreadWindow:
+      description: 从其最新 message 往回展示的 chat。
+      type: object
+      required: [id, title, titleState, createdAt, updatedAt, activityAt, projectId, model, webSearchEnabled, pinned, contextUsage, activeRun, messageCount, revision, presetId, messages, hasOlder]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        titleState: {$ref: "#/components/schemas/TitleState"}
+        createdAt: {type: [string, "null"]}
+        updatedAt: {type: [string, "null"]}
+        activityAt: {type: string, description: "该 chat 最新 message 的写入时间。"}
+        projectId: {type: [string, "null"]}
+        model: {type: string}
+        webSearchEnabled: {type: boolean}
+        pinned: {type: boolean}
+        contextUsage:
+          description: "该 chat 的上一个 prompt 填充了模型窗口的多少。"
+          type: [object, "null"]
+          required: [usedTokens, limitTokens, percentage]
+          properties:
+            usedTokens: {type: integer}
+            limitTokens: {type: integer}
+            percentage: {type: number}
+        activeRun:
+          description: "提示 reply 可能正在流式输出，直到该 run 的截止时间。它绝不会锁住该 chat。"
+          type: [object, "null"]
+          required: [runId, expiresAt, instance]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "持有该 run 的实例，客户端在 reload 后 follow 或取消它时会把它作为 X-Tinfoil-Harness-Instance 发送。"}
+        messageCount: {type: integer}
+        flagged: {type: boolean, description: "safeguards 标记了该 chat，它不再接收更多 turn。"}
+        revision: {type: string}
+        presetId: {type: [string, "null"]}
+        messages: {type: array, items: {$ref: "#/components/schemas/MessageView"}}
+        hasOlder: {type: boolean}
+
+    MessageView:
+      description: 客户端所展示形式的一条 message，是 question 的文本或 reply 的 timeline，并带其 attachment 的元数据。
+      type: object
+      required: [id, role, createdAt]
+      properties:
+        id: {type: string}
+        role: {$ref: "#/components/schemas/Role"}
+        createdAt: {type: string}
+        content: {type: string, description: "question 的文本，或 compaction 标记的摘要。"}
+        timeline: {type: array, items: {$ref: "#/components/schemas/Block"}, description: "reply 的 step。"}
+        quote: {type: string}
+        model: {type: string}
+        modelDisplayName: {type: string}
+        isError: {type: boolean}
+        isInterrupted: {type: boolean}
+        usage: {$ref: "#/components/schemas/MessageUsage"}
+        annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
+        attachments: {type: array, items: {$ref: "#/components/schemas/AttachmentView"}}
+        answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}, description: "question 对 questions widget 的回答，即它发送给模型时的形式。"}
+        compaction: {$ref: "#/components/schemas/Compaction"}
+        research: {$ref: "#/components/schemas/Research"}
+
+    Research:
+      description: |
+        设置在要求深度 research 的 question 上，以及对其 question 做了 research
+        的 reply 上，如 TurnOptions.research 所述。客户端可以显示这类 question
+        要求了深度 research。这类 reply 的 timeline 保存着 research 的 reasoning
+        及其 web_search 和 web_fetch 调用，然后是保存 report 的
+        render_artifact_preview 调用与说明其发现的文本，或直接以 report 作为其
+        文本。客户端可以把 research 的 step 与 report 分开展示。模型把该 reply
+        只读作其 report。
+      type: object
+      required: [version]
+      properties:
+        version: {type: integer, description: "它进行研究时所依据的指令版本。"}
+
+    Compaction:
+      description: |
+        compaction 标记对其摘要所记录的内容。compaction 标记是一条 role 为
+        compaction 的 message，其 content 概括它之前的每条 message，模型以它
+        替代这些 message 来读取。它紧邻某个 question 之前，或在带 compactLatest
+        的 compact turn 之后位于 chat 末尾，直到下一个 question。客户端把 chat
+        最新标记之前的 message 展示为模型不再读取的内容，并把该标记展示为用户
+        可以打开以阅读摘要的一个 step。该标记不是该 chat 的 message 之一：
+        messageCount 会略去它，客户端也不对它提供任何 action。
+      type: object
+      required: [messages, startedAt, endedAt, model, version]
+      properties:
+        messages: {type: integer, description: "摘要覆盖的 message 数量，包括更早标记已覆盖的那些，无论设备是否把该标记之前的 message 发送给了 harness。"}
+        startedAt: {type: number, description: "摘要开始的时间，epoch 毫秒。"}
+        endedAt: {type: number, description: "摘要写出的时间，epoch 毫秒。"}
+        model: {type: string, description: "写出该摘要的模型。"}
+        version: {type: integer, description: "它撰写时所依据的指令版本。"}
+
+    WidgetAnswers:
+      description: 用户发送 question 时对某个 questions widget 所回答的内容，连同这些 question 的文本，这样无论 widget 之后如何变化，读取结果都一致。
+      type: object
+      required: [toolCallId, questions]
+      properties:
+        toolCallId: {type: string}
+        title: {type: string}
+        questions: {type: array, items: {$ref: "#/components/schemas/AnsweredQuestion"}}
+
+    AnsweredQuestion:
+      type: object
+      required: [id, prompt, answered, selected]
+      properties:
+        id: {type: string}
+        prompt: {type: string}
+        answered: {type: boolean, description: "未回答的 question 为 False。已回答的 question 可能没有选中任何项，如同什么都没勾选的清单。"}
+        selected: {type: array, items: {$ref: "#/components/schemas/QuestionOption"}}
+
+    QuestionOption:
+      type: object
+      required: [id, label]
+      properties:
+        id: {type: string}
+        label: {type: string}
+
+    Role:
+      description: 谁写了一条 message，或 compaction 标记的 compaction。客户端会略去它不认识的 role 的 message。
+      anyOf:
+        - {type: string, enum: [user, assistant, compaction]}
+        - {type: string}
+
+    MessageUsage:
+      type: object
+      required: [promptTokens, completionTokens]
+      properties:
+        promptTokens: {type: integer}
+        completionTokens: {type: integer}
+
+    Block:
+      description: reply 的一个 step，是文本、reasoning 或工具调用。工具返回的内容按原样保留。
+      type: object
+      required: [id, type]
+      properties:
+        id: {type: string}
+        type:
+          description: 客户端会略去它不认识的 type 的 block。
+          anyOf:
+            - {type: string, enum: [content, thinking, tool_call]}
+            - {type: string}
+        content: {type: string}
+        toolCallId: {type: string}
+        name: {type: string}
+        arguments: {type: string}
+        complete: {type: boolean}
+        result: {$ref: "#/components/schemas/Json"}
+        metadata: {$ref: "#/components/schemas/Json"}
+        progress: {type: array, items: {$ref: "#/components/schemas/Json"}}
+        activity: {$ref: "#/components/schemas/Json"}
+        display: {$ref: "#/components/schemas/ToolDisplay"}
+        startedAt: {type: number, description: "epoch 毫秒。"}
+        endedAt: {type: number, description: "epoch 毫秒。"}
+        duration: {type: number, description: "一个 reasoning step 思考的时长，秒。"}
+        answers:
+          type: object
+          description: "某个 questions widget 调用中用户所选 option 的 id，按 question id 分组。未出现在其中的 question 即未回答。"
+          additionalProperties: {type: array, items: {type: string}}
+        invalidArguments: {type: boolean, description: "widget 当前的声明拒绝了该调用的参数，因此客户端会提供重新生成它们的机会。"}
+
+    ToolDisplay:
+      description: 联网搜索或页面抓取所展示的内容，在其运行期间保持最新。
+      type: object
+      required: [status, sources]
+      properties:
+        query: {type: string}
+        url: {type: string}
+        status:
+          description: 客户端把它不认识的 status 视为 completed 展示。
+          anyOf:
+            - {type: string, enum: [running, completed, failed]}
+            - {type: string}
+        sources:
+          type: array
+          items:
+            type: object
+            required: [url, title]
+            properties:
+              url: {type: string}
+              title: {type: string}
+              snippet: {type: string}
+
+    Annotation:
+      description: reply 对某个页面的引用标注。
+      type: object
+      required: [type]
+      properties:
+        type: {const: url_citation}
+        url_citation:
+          type: object
+          required: [url, title, start_index, end_index]
+          properties:
+            url: {type: string}
+            title: {type: string}
+            start_index: {type: integer}
+            end_index: {type: integer}
+
+    AttachmentKind:
+      description: attachment 所持有的内容。客户端把它不认识的 kind 的 attachment 展示为文件。
+      anyOf:
+        - {type: string, enum: [image, document, audio]}
+        - {type: string}
+
+    AttachmentView:
+      description: attachment 的元数据、缩略图及其内联持有的任何文本。
+      type: object
+      required: [id, kind, fileName, mimeType]
+      properties:
+        id: {type: string}
+        kind: {$ref: "#/components/schemas/AttachmentKind"}
+        fileName: {type: string}
+        mimeType: {type: string}
+        size: {type: integer}
+        thumbnail: {type: string}
+        textContent: {type: string}
+        description: {type: string}
+
+    Attachment:
+      description: 上传返回的、以及设备 chat 保存的 attachment。
+      type: object
+      required: [id, kind, fileName, mimeType]
+      properties:
+        id: {type: string}
+        kind: {$ref: "#/components/schemas/AttachmentKind"}
+        fileName: {type: string}
+        mimeType: {type: string}
+        size: {type: integer}
+        thumbnail: {type: string}
+        textContent: {type: string}
+        description: {type: string}
+        pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
+        base64: {type: string, description: "模型读取的图片副本。"}
+        originalBase64: {type: string, description: "导入图片的原始文件，只出现在 import 的行中。客户端会把它与 chat 分开放置。"}
+
+    DocumentPage:
+      type: object
+      required: [image, is_scanned, page, text]
+      properties:
+        image: {type: string}
+        is_scanned: {type: boolean}
+        page: {type: integer}
+        text: {type: string}
+
+    ThreadRecord:
+      description: |
+        一个完整的 chat，即设备保存的形式。设备 chat 的 run 会返回它，下一个
+        turn 再把它作为 thread 发回。客户端保留每个成员，包括本文档未列出的
+        成员，并把它们原样发回。
+      type: object
+      required: [id, title, titleState, model, presetId, pinned, webSearchEnabled, messages, recordVersion]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        titleState: {$ref: "#/components/schemas/TitleState"}
+        createdAt: {type: string}
+        updatedAt: {type: string}
+        model: {type: string}
+        projectId: {type: [string, "null"]}
+        presetId: {type: [string, "null"]}
+        pinned: {type: boolean}
+        webSearchEnabled: {type: boolean}
+        messages: {type: array, items: {$ref: "#/components/schemas/MessageRecord"}}
+        lastRequestId: {type: string}
+        lastRequestKind: {type: string, description: "上一次请求的 turn 做了什么，重试会重复它。compaction 只在失败时记录。"}
+        activeRun:
+          description: "提示 reply 可能正在流式输出，直到该 run 的截止时间。它绝不会锁住该 chat。"
+          type: [object, "null"]
+          required: [runId, expiresAt, instance]
+          properties:
+            runId: {type: string}
+            expiresAt: {$ref: "#/components/schemas/Timestamp"}
+            instance: {type: string, description: "持有该 run 的实例，客户端在 reload 后 follow 或取消它时会把它作为 X-Tinfoil-Harness-Instance 发送。"}
+        contextUsage: {$ref: "#/components/schemas/ContextUsage"}
+        flagged: {type: boolean}
+        harnessHiddenCount: {type: integer, description: "ask 的 chat 作为上下文持有、但不展示的前置 message 数量。"}
+        recordVersion: {type: integer, description: "harness 写入该记录所用的格式。"}
+
+    MessageRecord:
+      type: object
+      required: [id, role, createdAt, content]
+      properties:
+        id: {type: string}
+        role: {$ref: "#/components/schemas/Role"}
+        createdAt: {type: string}
+        content: {type: string}
+        quote: {type: string}
+        model: {type: string}
+        modelDisplayName: {type: string}
+        timeline: {type: array, items: {$ref: "#/components/schemas/Block"}}
+        attachments: {type: array, items: {$ref: "#/components/schemas/Attachment"}}
+        annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
+        usage: {$ref: "#/components/schemas/MessageUsage"}
+        isError: {type: boolean}
+        isInterrupted: {type: boolean}
+        answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}}
+        compaction: {$ref: "#/components/schemas/Compaction"}
+        research: {$ref: "#/components/schemas/Research"}
+
+    ThreadInput:
+      description: |
+        客户端发送的设备 chat：harness 返回的 ThreadRecord 整份发回，或没有
+        recordVersion 的记录（旧客户端保留的，或客户端为新 chat 制作的）。
+        harness 会拒绝带有其版本所没有的成员的 ThreadRecord。
+
+        当 session 的 features.partialThread 为 true 时，客户端可以从其最新
+        compaction 标记起发送 ThreadRecord，略去该标记之前、已由其摘要覆盖的
+        message。它可以在 turn、修改 chat 设置、回答 questions widget 以及
+        朗读 message 的请求中这样做，除非该请求指明的 message、tool call 或
+        attachment 属于被略去的 message，此时会发送整份记录。turn 也会发送
+        整份记录，除非标记之后有某个 question 位于它所要回答的 question 之前：
+        harness 会读取 turn 所回答的 question 之前的那轮交流，而标记本会覆盖
+        它。harness 读取该 chat 的方式与读取整份记录相同，除了 question 不会
+        发送对属于被略去 message 的 questions widget 的任何 answer。它返回的
+        chat 也从该标记起，包括 run 的 thread 与 window，其 messageCount 计数
+        发送的 message：客户端会保留被略去的 message，置于返回的 message 之前。
+        其余每个请求都发送整份记录。
+      type: object
+      additionalProperties: true
+      properties:
+        recordVersion: {type: integer, description: "harness 返回的 ThreadRecord 的版本。旧客户端保留的、或客户端制作的记录中无此项。"}
+        title: {type: string}
+        titleState: {type: string}
+        model: {type: string}
+        lastRequestId: {type: string}
+        pinned: {type: boolean}
+        webSearchEnabled: {type: boolean}
+        presetId: {type: [string, "null"]}
+        messages:
+          type: array
+          maxItems: 10000
+          items:
+            type: object
+            additionalProperties: true
+            required: [role]
+            properties:
+              id: {$ref: "#/components/schemas/Identifier"}
+              role: {$ref: "#/components/schemas/Role"}
+              content: {type: [string, "null"]}
+              attachments: {type: array}
+              timeline: {type: array}
+
+    MessageRequest:
+      type: object
+      required: [threadId, messageId]
+      properties:
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        local: {type: boolean}
+        thread: {$ref: "#/components/schemas/ThreadInput"}
+        profile: {$ref: "#/components/schemas/ProfileInput"}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        messageId: {$ref: "#/components/schemas/Identifier"}
+        content: {type: string}
+
+    DeviceThreadReply:
+      type: object
+      required: [thread]
+      properties:
+        thread: {$ref: "#/components/schemas/ThreadRecord"}
+
+    SharedThread:
+      description: 已打开的分享，其 attachment 指明读取每个 blob 的 key。分享不包含 compaction 标记，只包含对话。
+      type: object
+      required: [title, createdAt, messages]
+      properties:
+        title: {type: string}
+        createdAt: {type: [string, "null"]}
+        messages:
+          type: array
+          items:
+            type: object
+            required: [id, role, createdAt]
+            properties:
+              id: {type: string}
+              role: {$ref: "#/components/schemas/Role"}
+              createdAt: {type: string}
+              content: {type: string, description: "question 的文本。"}
+              timeline: {type: array, items: {$ref: "#/components/schemas/Block"}, description: "reply 的 step。"}
+              quote: {type: string}
+              model: {type: string}
+              modelDisplayName: {type: string}
+              isError: {type: boolean}
+              isInterrupted: {type: boolean}
+              usage: {$ref: "#/components/schemas/MessageUsage"}
+              annotations: {type: array, items: {$ref: "#/components/schemas/Annotation"}}
+              answers: {type: array, items: {$ref: "#/components/schemas/WidgetAnswers"}}
+              attachments:
+                type: array
+                items:
+                  type: object
+                  required: [id, kind, fileName, mimeType, attKey]
+                  properties:
+                    id: {type: string}
+                    kind: {$ref: "#/components/schemas/AttachmentKind"}
+                    fileName: {type: string}
+                    mimeType: {type: string}
+                    size: {type: integer}
+                    thumbnail: {type: string}
+                    textContent: {type: string}
+                    description: {type: string}
+                    attKey: {type: [string, "null"]}
+
+    AttachmentRequest:
+      description: 已存储 chat 的 attachment，或分享按其链接所带 key 指明的 attachment。
+      type: object
+      required: [id]
+      properties:
+        type: {type: string}
+        key: {type: string, description: "账户的 content key，base64 编码。设备 chat 与未登录调用方不携带。"}
+        id: {$ref: "#/components/schemas/Identifier"}
+        threadId: {$ref: "#/components/schemas/Identifier"}
+        attKey: {type: string}
+        kind: {$ref: "#/components/schemas/AttachmentKind"}
+        fileName: {type: string}
+        mimeType: {type: string}
+        textContent: {type: string}
+        pages: {type: array, items: {$ref: "#/components/schemas/DocumentPage"}}
+
+    # --- Profile --------------------------------------------------------------
+
+    Profile:
+      description: 账户的设置。profile 未包含的字段，其值取自 session 的 profileDefaults。
+      type: object
+      properties:
+        themeMode:
+          description: 客户端对它不认识的值应用自身默认值，并保留该值。
+          anyOf:
+            - {type: string, enum: [light, dark, system]}
+            - {type: string}
+        chatFont:
+          description: 客户端对它不认识的值应用自身默认值，并保留该值。
+          anyOf:
+            - {type: string, enum: [system, serif, mono, dyslexic]}
+            - {type: string}
+        language: {type: string}
+        nickname: {type: string}
+        profession: {type: string}
+        traits: {type: array, items: {type: string}}
+        additionalContext: {type: string}
+        isUsingPersonalization: {type: boolean}
+        isUsingCustomPrompt: {type: boolean}
+        customSystemPrompt: {type: string}
+        customPromptPresets: {type: array, items: {$ref: "#/components/schemas/CustomPreset"}}
+        favoritePromptPresetIds: {type: array, items: {type: string}}
+        defaultPromptPresetId: {type: string}
+        selectedModel: {type: string}
+        autoIntelligence: {type: string}
+        reasoningEffort: {type: string}
+        thinkingEnabled: {type: boolean}
+        webSearchEnabled: {type: boolean}
+        webSearchAvailable: {type: boolean}
+        piiCheckEnabled: {type: boolean}
+        genUIEnabled: {type: boolean}
+        pixelateSidebarChatTitlesEnabled: {type: boolean}
+        browserTabChatTitleEnabled: {type: boolean}
+        enterToNewlineEnabled: {type: boolean}
+        readAloudSpeed: {type: number, minimum: 0.5, maximum: 2, description: "reply 的朗读速度，即 speech 请求发送的 speed。"}
+        hasSeenOnboarding: {type: boolean}
+        hasSeenWebSearchIntro: {type: boolean}
+        dismissed: {type: object, additionalProperties: {type: boolean}}
+
+    ProfileView:
+      type: object
+      properties:
+        themeMode:
+          description: 客户端对它不认识的值应用自身默认值，并保留该值。
+          anyOf:
+            - {type: string, enum: [light, dark, system]}
+            - {type: string}
+        chatFont:
+          description: 客户端对它不认识的值应用自身默认值，并保留该值。
+          anyOf:
+            - {type: string, enum: [system, serif, mono, dyslexic]}
+            - {type: string}
+        language: {type: string}
+        nickname: {type: string}
+        profession: {type: string}
+        traits: {type: array, items: {type: string}}
+        additionalContext: {type: string}
+        isUsingPersonalization: {type: boolean}
+        isUsingCustomPrompt: {type: boolean}
+        customSystemPrompt: {type: string}
+        customPromptPresets: {type: array, items: {$ref: "#/components/schemas/CustomPreset"}}
+        favoritePromptPresetIds: {type: array, items: {type: string}}
+        defaultPromptPresetId: {type: string}
+        selectedModel: {type: string}
+        autoIntelligence: {type: string}
+        reasoningEffort: {type: string}
+        thinkingEnabled: {type: boolean}
+        webSearchEnabled: {type: boolean}
+        webSearchAvailable: {type: boolean}
+        piiCheckEnabled: {type: boolean}
+        genUIEnabled: {type: boolean}
+        pixelateSidebarChatTitlesEnabled: {type: boolean}
+        browserTabChatTitleEnabled: {type: boolean}
+        enterToNewlineEnabled: {type: boolean}
+        readAloudSpeed: {type: number, minimum: 0.5, maximum: 2, description: "reply 的朗读速度，即 speech 请求发送的 speed。"}
+        hasSeenOnboarding: {type: boolean}
+        hasSeenWebSearchIntro: {type: boolean}
+        dismissed: {type: object, additionalProperties: {type: boolean}}
+        updatedAt: {$ref: "#/components/schemas/Timestamp"}
+
+    ProfileInput:
+      description: 设备保存的、客户端作为 Profile 发送的设置。它们可能含有旧客户端写入的值，因此 harness 宽松地读取它们，忽略它不认识的字段和类型错误的字段。
+      type: object
+      additionalProperties: true
+
+    CustomPreset:
+      description: 用户保存的 prompt。其时间戳按客户端写入的原样保留。已存储的 prompt 始终有 description 和 systemPrompt（未设置时为空）以及数字时间戳（不带时间戳存储时补上），这是各应用自身 profile 同步所要求的。
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        systemPrompt: {type: string}
+        model: {type: string}
+        webSearchEnabled: {type: boolean}
+        createdAt: {$ref: "#/components/schemas/Json"}
+        updatedAt: {$ref: "#/components/schemas/Json"}
+
+    PresetUpdate:
+      description: 对已保存 prompt 的修改，只设置它所指明的成员。null 的 model 或 webSearchEnabled 会清除该设置。
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        name: {type: string, minLength: 1}
+        description: {type: string}
+        systemPrompt: {type: string}
+        model: {type: [string, "null"]}
+        webSearchEnabled: {type: [boolean, "null"]}
+        updatedAt: {$ref: "#/components/schemas/Json"}
+
+    # --- Projects -------------------------------------------------------------
+
+    Project:
+      type: object
+      required: [id, name, description, systemInstructions, color]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        systemInstructions: {type: string}
+        color: {type: [string, "null"]}
+        createdAt: {$ref: "#/components/schemas/Timestamp"}
+        updatedAt: {$ref: "#/components/schemas/Timestamp"}
+
+    ProjectDocument:
+      description: document 提取出的文本，其 project 的每个 chat 都会读取。
+      type: object
+      required: [id, projectId, filename, contentType, sizeBytes]
+      properties:
+        id: {type: string}
+        projectId: {type: string}
+        filename: {type: string}
+        contentType: {type: string}
+        sizeBytes: {type: integer}
+        content: {type: string}
+        thumbnailBase64: {type: string}
+        createdAt: {$ref: "#/components/schemas/Timestamp"}
+        updatedAt: {$ref: "#/components/schemas/Timestamp"}
+
+    # --- Keys -----------------------------------------------------------------
+
+    KeyOrigin:
+      description: 账户 key 的建立方式。客户端把它不认识的 origin 视为 unknown。
+      anyOf:
+        - {type: string, enum: [passkey, manual, recovery, start_fresh]}
+        - {type: string}
+
+    KeyRef:
+      type: object
+      required: [key]
+      properties:
+        key: {type: string, description: "一个 content key，base64 编码。"}
+
+    KeyBundleInput:
+      type: object
+      required: [credential_id, kek_iv, encrypted_keys]
+      properties:
+        credential_id: {type: string}
+        kek_iv: {type: string, description: "AES-GCM IV，hex 编码。"}
+        encrypted_keys: {type: string, description: "封装后的 content key，hex 编码。"}
+
+    KeyCurrent:
+      type: object
+      required: [key_id, bundles]
+      properties:
+        key_id: {type: [string, "null"], description: "hex 编码。账户没有 key 时为 null。"}
+        etag: {type: string}
+        bundles:
+          description: "按 credential id 分组的 passkey bundle。key 还没有任何 bundle 时为 null。"
+          type: [object, "null"]
+          additionalProperties:
+            type: object
+            required: [credential_id, kek_iv, encrypted_keys]
+            properties:
+              credential_id: {type: string}
+              kek_iv: {type: string}
+              encrypted_keys: {type: string}
+              bundle_version: {type: integer}
+              created_at: {type: string}
+              updated_at: {type: string}
+        created_via: {$ref: "#/components/schemas/KeyOrigin"}
+        created_at: {type: string}
+        has_data: {type: boolean, description: "账户存在未以该 key 封存的行。"}
+
+    ResealReport:
+      description: "reseal 的进展：已重新封存的行、仍需尝试的行，以及任何给定 key 都无法打开的行。"
+      type: object
+      required: [status, migrated, remaining, blocked, partial]
+      properties:
+        status:
+          description: 客户端把它不认识的 status 视为 running。
+          anyOf:
+            - {type: string, enum: [running, complete, failed]}
+            - {type: string}
+        migrated: {type: integer}
+        remaining: {type: integer}
+        blocked: {type: integer}
+        partial: {type: boolean, description: "在每一行都尝试之前，reseal 的时间或账户的凭证已耗尽；后续调用会继续它。"}
+
+    # --- Archives -------------------------------------------------------------
+
+    ImportLine:
+      description: 设备 import 的一行。
+      type: object
+      properties:
+        thread:
+          description: 一个设备 chat。其图片的 attachment 会把归档的原始文件作为 originalBase64 携带。
+          $ref: "#/components/schemas/ThreadRecord"
+        done:
+          type: object
+          required: [jobId, warnings]
+          properties:
+            jobId: {type: [string, "null"], description: "云端 import job，客户端会轮询其状态。"}
+            warnings: {type: array, items: {type: string}}
+        error: {$ref: "#/components/schemas/ErrorBody"}
+
+    ImportStatus:
+      type: object
+      required: [jobId, status, imported, failed, total]
+      properties:
+        jobId: {type: string}
+        status: {type: string}
+        phase: {type: string}
+        imported: {type: integer}
+        failed: {type: integer}
+        total: {type: integer}
+        counts:
+          type: object
+          additionalProperties:
+            type: object
+            required: [imported, skipped, failed, blocked]
+            properties:
+              imported: {type: integer}
+              skipped: {type: integer}
+              failed: {type: integer}
+              blocked: {type: integer}
+        warnings: {type: array, items: {type: string}}
+        errors: {type: array, items: {type: string}}
+        failureReason: {type: string}
+        failureDetail: {type: string}
+
+    # --- Metadata -------------------------------------------------------------
+
+    LinkPreview:
+      type: object
+      required: [url, title, description, siteName, image]
+      properties:
+        url: {type: string}
+        title: {type: [string, "null"]}
+        description: {type: [string, "null"]}
+        siteName: {type: [string, "null"]}
+        image: {type: [string, "null"]}

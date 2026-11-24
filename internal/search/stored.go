@@ -1,3 +1,6 @@
+// 本文件定义聊天写入进入索引的更新与应用：ChatStored/ChatRemoved 将写入送入 writer，
+// apply 把更新合并进索引并一次发布，storeEntry/removeEntry 处理条目，snapshotState 判断
+// 聊天是否仍处于索引条目所依据的修订。
 package search
 
 import (
@@ -20,6 +23,10 @@ import (
 // now, while the harness holds it, and the caller's writer applies it
 // after. Nothing here may fail the write: a failure degrades search until
 // a rebuild, and a panic is contained the same way.
+// ChatStored 把刚写入的聊天纳入调用方的索引，位置在其写入返回的修订及留下的 source 修订处。
+// 写入已经落地，不等待索引：聊天文本此刻在 harness 仍持有它时被读取，之后由调用方的 writer
+// 应用。这里的任何操作都不得使写入失败：失败只会在 rebuild 之前降低搜索质量，panic 也以同样
+// 方式被遏制。
 func (s *Service) ChatStored(p *auth.Principal, key auth.ContentKey, id string, plaintext []byte, etag string, at time.Time, revision int64) {
 	defer clear(key[:])
 	defer func() { _ = recover() }()
@@ -38,6 +45,8 @@ func (s *Service) ChatStored(p *auth.Principal, key auth.ContentKey, id string, 
 // caller's writer as ChatStored does. A stale entry only means a deleted
 // chat can still come up until the next rebuild, so a failure is let go,
 // as is a panic.
+// ChatRemoved 从调用方的索引中移除一条已删除的聊天，与 ChatStored 一样经由其 writer。陈旧
+// 条目最多意味着已删除的聊天在下次 rebuild 前仍可能被检索到，因此失败与 panic 都予以放过。
 func (s *Service) ChatRemoved(p *auth.Principal, key auth.ContentKey, id string, revision int64) {
 	defer clear(key[:])
 	defer func() { _ = recover() }()
@@ -58,6 +67,10 @@ func (s *Service) ChatRemoved(p *auth.Principal, key auth.ContentKey, id string,
 // writes of the chat well before the embedding round trip can reorder
 // their completion. replaced are the source revisions of the chat's
 // earlier writes whose updates this one took the place of while waiting.
+// chatUpdate 表示一次聊天写入对索引造成的变更：写入后留下的聊天、其文本切成的 chunk 与
+// token，或它的删除。at 是写入落地的时间，用于将条目相对该聊天的其他写入排序，且远在
+// embedding 往返可能打乱完成顺序之前。replaced 是在等待期间被本次更新所取代的、该聊天
+// 更早写入的 source 修订。
 type chatUpdate struct {
 	id       string
 	removed  bool
@@ -70,12 +83,14 @@ type chatUpdate struct {
 }
 
 // storedUpdate is the update a chat's write leaves for its index.
+// storedUpdate 是一次聊天写入留给其索引的更新。
 func storedUpdate(id string, plaintext []byte, etag string, at time.Time, revision int64) chatUpdate {
 	chunks := chatChunks(plaintext)
 	return chatUpdate{id: id, etag: etag, at: at, revision: revision, chunks: chunks, tokens: searchindex.Tokenize(strings.Join(chunks, "\n"))}
 }
 
 // revisions are the source revisions of the writes an update stands for.
+// revisions 是一次更新所代表的那些写入的 source 修订。
 func (u *chatUpdate) revisions() []int64 {
 	if u.revision <= 0 {
 		return u.replaced
@@ -86,6 +101,8 @@ func (u *chatUpdate) revisions() []int64 {
 // outcome is what became of an update in a publication: taken when the
 // index reflects its writes, superseded when a later write of the chat
 // replaced them before the index took them, and missed otherwise.
+// outcome 表示一次更新在一次 publication 中的结局：索引已反映其写入时为 taken；在索引接收
+// 之前被该聊天更晚的写入取代时为 superseded；其余为 missed。
 type outcome int
 
 const (
@@ -99,6 +116,9 @@ const (
 // superseded, by chat, which that write's update then stands for. The
 // publication covers the writes it took up to the first gap, as complete
 // when the index it changed was complete and readable.
+// apply 把调用方的更新合并进其索引并一次性发布，返回被这些聊天更晚写入所取代的更新的修订
+// （按聊天分组），那些更晚写入的更新随后会代表它们。publication 覆盖其接收的写入，直到第一个
+// 缺口；当它所修改的索引是完整且可读时，标为 complete。
 func (s *Service) apply(ctx context.Context, c caller, updates []chatUpdate) (map[string][]int64, error) {
 	owner := c.owner()
 	inHand, embed := map[int64]bool{}, true
@@ -116,6 +136,8 @@ func (s *Service) apply(ctx context.Context, c caller, updates []chatUpdate) (ma
 			// Without vectors the chat is still found by keyword, and a
 			// later query repairs the embedding. One embedding refused
 			// or failed, the rest of the batch goes without.
+			// 没有向量时聊天仍可凭关键词检索到，之后的查询会修复 embedding。一旦某次 embedding
+			// 被拒绝或失败，本批次其余条目就都不带向量。
 			entries[i].EmbeddingPending, entries[i].EmbeddingKeyID = true, c.kid
 			if embed {
 				vectors, err := s.embedChunks(ctx, owner, docPrefix, u.chunks, false)
@@ -130,6 +152,7 @@ func (s *Service) apply(ctx context.Context, c caller, updates []chatUpdate) (ma
 	defer unlock()
 	// A removal leaves the entry of a chat that may have been made again
 	// under its id since.
+	// 删除会留下一个可能此后又以同一 id 重新创建的聊天的条目。
 	remade := map[string]bool{}
 	for _, u := range updates {
 		if u.removed {
@@ -196,6 +219,9 @@ func (s *Service) apply(ctx context.Context, c caller, updates []chatUpdate) (ma
 // has counted since is another update in hand; only a gap costs a read
 // of the chat's metadata, which says whether the chat was overwritten or
 // deleted since.
+// storeEntry 把一次聊天写入应用到索引，返回它是否改变了索引以及该写入的结局。当控制平面计数
+// 到的此后每次聊天写入都是手里另一个更新时，该写入被信任为聊天的活跃修订；只有出现缺口时
+// 才去读聊天元数据，以判断聊天此后是否被覆盖或删除。
 func (s *Service) storeEntry(ctx context.Context, c caller, ix *searchindex.Index, publication *controlplane.SearchIndexState, inHand map[int64]bool, u *chatUpdate, entry searchindex.Entry) (bool, outcome) {
 	if !liveSince(u.revision, publication.SourceRevision, inHand) {
 		switch state, err := s.snapshotState(ctx, c, u.id, u.etag); {
@@ -211,6 +237,7 @@ func (s *Service) storeEntry(ctx context.Context, c caller, ix *searchindex.Inde
 	}
 	// A slower write must not replace the entry a newer write, or a
 	// rebuild, already made for this chat.
+	// 较慢的写入不得覆盖更晚的写入或 rebuild 已经为该聊天建立的条目。
 	if existing, ok := ix.Chats[u.id]; ok && (entrySupersedes(existing, u.etag, u.revision, u.at) || existing.SourceRevision == u.revision && existing.ETag == u.etag) {
 		return false, taken
 	}
@@ -222,6 +249,8 @@ func (s *Service) storeEntry(ctx context.Context, c caller, ix *searchindex.Inde
 
 // liveSince is whether every chat write after revision, up to source, is
 // one in hand, none of which is another write of the same chat.
+// liveSince 表示 revision 之后直到 source 为止的每次聊天写入是否都在手，且其中没有该聊天的
+// 另一次写入。
 func liveSince(revision, source int64, inHand map[int64]bool) bool {
 	if revision <= 0 {
 		return false
@@ -236,6 +265,7 @@ func liveSince(revision, source int64, inHand map[int64]bool) bool {
 
 // removeEntry applies a chat's removal to the index, and is whether it
 // dropped the chat's entry and what became of the removal.
+// removeEntry 把聊天的删除应用到索引，返回它是否丢弃了该聊天的条目以及删除的结局。
 func removeEntry(ix *searchindex.Index, state loadState, u *chatUpdate, remade bool) (bool, outcome) {
 	if remade {
 		return false, superseded
@@ -247,6 +277,7 @@ func removeEntry(ix *searchindex.Index, state loadState, u *chatUpdate, remade b
 	case exists && u.revision > 0 && existing.SourceRevision > u.revision:
 		// The entry is from a write after this deletion: a chat made
 		// again under the id, which stays.
+		// 条目来自此删除之后的一次写入：以该 id 重新创建的聊天，予以保留。
 		return false, taken
 	}
 	ix.Remove(u.id)
@@ -255,6 +286,7 @@ func removeEntry(ix *searchindex.Index, state loadState, u *chatUpdate, remade b
 
 // snapshotState is whether a chat is still at the revision an index entry
 // was built from, has changed since, or is gone.
+// snapshotState 表示一个聊天是否仍处于索引条目所依据的修订、此后已变更，或已消失。
 type snapshotState int
 
 const (
@@ -264,6 +296,7 @@ const (
 )
 
 // snapshotState compares a chat's stored revision with etag.
+// snapshotState 将聊天当前存储的修订与 etag 比较。
 func (s *Service) snapshotState(ctx context.Context, c caller, id, etag string) (snapshotState, error) {
 	current, exists, err := s.currentETag(ctx, c, id)
 	switch {
@@ -283,6 +316,10 @@ func (s *Service) snapshotState(ctx context.Context, c caller, id, etag string) 
 // plane that does not route it answers not found for live chats, and
 // taking that for deleted would silently drop the chat from the index,
 // so the chat itself is read before a miss counts.
+// currentETag 返回聊天当前存储的修订；已删除的聊天没有。它在 owner 锁下运行，因此只读聊天
+// 的元数据而非其字节。不过元数据读取失败存在歧义：不路由该请求的控制平面会对存活聊天回答
+// not found，若把这种情况当成已删除就会悄悄把聊天从索引中丢弃，因此只有先读取聊天本身之后
+// 才把未命中当回事。
 func (s *Service) currentETag(ctx context.Context, c caller, id string) (etag string, exists bool, err error) {
 	owner := c.owner()
 	if meta, err := s.Controlplane.HeadBlob(ctx, "chat", id, string(c.p.JWT), owner); err == nil {
@@ -305,6 +342,8 @@ func controlplaneStatus(err error, status int) bool {
 
 // etagGeneration reads a revision as the control plane's per-row counter;
 // ok is false for any other shape, which is ordered by time instead.
+// etagGeneration 把修订读作控制平面的逐行计数器；其他任何形式都返回 ok=false，此时改按时间
+// 排序。
 func etagGeneration(etag string) (int64, bool) {
 	generation, err := strconv.ParseInt(etag, 10, 64)
 	return generation, err == nil
@@ -314,6 +353,8 @@ func etagGeneration(etag string) (int64, bool) {
 // revision of its chat than a write at etag. The source revision orders
 // writes across replicas; the per-row revision, then the write time,
 // order entries without one.
+// entrySupersedes 表示一个索引条目是否来自比 etag 处写入严格更新的聊天修订。source 修订用于
+// 跨 replica 排序写入；没有 source 修订的条目则按逐行修订、再按写入时间排序。
 func entrySupersedes(existing searchindex.Entry, etag string, revision int64, at time.Time) bool {
 	if existing.SourceRevision > 0 && revision > 0 {
 		return existing.SourceRevision > revision

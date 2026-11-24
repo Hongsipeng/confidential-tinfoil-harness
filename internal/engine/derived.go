@@ -13,6 +13,8 @@ import (
 // titleSource is the text a title summarizes: the first user message, or the
 // content of its documents. It is read from the prompt's copy of the thread,
 // since a stored row keeps no document content.
+// titleSource 是标题所汇总的文本：第一条用户消息，或其文档的内容。
+// 它从 prompt 的 thread 副本中读取，因为存储的行不保留文档内容。
 func titleSource(t *domain.Thread) string {
 	for _, m := range t.Messages {
 		if m.Role != "user" {
@@ -22,6 +24,7 @@ func titleSource(t *domain.Thread) string {
 		if text == "" {
 			for i := range m.Attachments {
 				// A document whose blob is gone must not name the chat.
+				// blob 已丢失的文档不能用来命名聊天。
 				if a := &m.Attachments[i]; attach.DocumentText(attach.Content(a)) != attach.UnavailableDocument(a) {
 					text += attach.DocumentText(attach.Content(a)) + " "
 				}
@@ -57,6 +60,7 @@ func (eng *Engine) generateTitle(ctx context.Context, r *Run, p *auth.Principal,
 	}
 	// A local thread's row lives only in this run, and its client stores the
 	// title it reads from the event below.
+	// 本地 thread 的行只存在于这个 run 中，其客户端保存它从下面事件中读到的标题。
 	if r.Thread.local {
 		eng.Live.mu.Lock()
 		defer eng.Live.mu.Unlock()

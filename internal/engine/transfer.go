@@ -15,10 +15,14 @@ import (
 // Moving a chat between the cloud and the device keeps its id, as the web
 // client always has. A chat on the device holds its attachments' content and
 // no server keys, since deleting the cloud copy deletes its blobs.
+// 在云端与设备之间移动聊天会保留其 id，正如 web 客户端一贯所做的那样。设备上的聊天保存
+// 其附件内容，且不保留服务器 key，因为删除云端副本就会删除其 blob。
 
 // ThreadTranscript is a stored chat in the form the device keeps: every
 // attachment's content inline and no server bookkeeping. It refuses when any
 // attachment cannot be read, so moving the chat never loses content.
+// ThreadTranscript 以设备所保存的形式返回已存储的聊天：每个附件的内容内联，且不含服务器
+// 簿记。当任何附件无法读取时会拒绝，这样移动聊天就绝不会丢失内容。
 func (eng *Engine) ThreadTranscript(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.ThreadRequest) (any, error) {
 	eng.Live.mu.Lock()
 	live := eng.Live.threads[liveKey(p, in.ThreadID)]
@@ -73,6 +77,7 @@ func (eng *Engine) ThreadTranscript(ctx context.Context, p *auth.Principal, key 
 	}{domain.DeviceTranscript{Thread: row.Thread}, row.ETag}, nil
 }
 
+// FinishTransfer 完成一次从云端到设备的转移：它删除云端的聊天副本。
 func (eng *Engine) FinishTransfer(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) error {
 	eng.Live.mu.Lock()
 	name := liveKey(p, in.ID)
@@ -99,6 +104,8 @@ func (eng *Engine) FinishTransfer(ctx context.Context, p *auth.Principal, key au
 // same id. Its attachments are stored under the new chat first, as the control plane
 // requires; the chat itself is a create, so an existing cloud chat is never
 // overwritten.
+// HandleThreadImport 将设备上的聊天以相同 id 存储为云端聊天。其附件会先存储在新聊天之下，
+// 正如 control plane 所要求的那样；聊天本身是创建操作，因此已有的云端聊天绝不会被覆盖。
 func (eng *Engine) HandleThreadImport(w http.ResponseWriter, r *http.Request) {
 	p, err := eng.Auth.Authenticate(r, false)
 	if err != nil {
@@ -128,6 +135,7 @@ func (eng *Engine) HandleThreadImport(w http.ResponseWriter, r *http.Request) {
 	api.Respond(w, result, err)
 }
 
+// ImportThread 将设备聊天作为云端聊天导入，除非该聊天已存在。
 func (eng *Engine) ImportThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *ThreadImportRequest) (any, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err

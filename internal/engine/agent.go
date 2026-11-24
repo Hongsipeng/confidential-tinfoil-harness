@@ -22,21 +22,28 @@ import (
 )
 
 const (
+	// MaxTurns 限制单个 run 中模型 turn 的次数上限。
 	MaxTurns = 16
 	// A tool result is bounded twice: what the model reads back, what the caller sees.
+	// 工具结果被限制两次：模型读回的内容，以及调用方看到的内容。
 	MaxToolOutput = 30000
 	maxSSEEvent   = 1 << 22
 	// maxToolCalls bounds the calls one model turn may open.
+	// maxToolCalls 限制单个模型 turn 可以开启的调用数量。
 	maxToolCalls = 128
 
+	// FinalAnswerInstruction 指示模型在达到工具迭代上限后停止调用工具并给出最佳答案。
 	FinalAnswerInstruction = "You have reached the maximum number of tool iterations. Do not call any more tools. Provide the best answer you can."
-	ContinueInstruction    = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
+	// ContinueInstruction 指示模型从上次停下的位置继续，不要重复或总结已写内容。
+	ContinueInstruction = "Continue your previous response exactly where it left off. Do not repeat, summarize, or restate anything you already wrote, and do not add any preamble."
 	// ClearedResult is what the model reads in place of a tool result it
 	// already answered, once the run's exchange outgrows the window.
+	// ClearedResult 是当 run 的 exchange 超出窗口后，模型在已应答过的工具结果位置读到的内容。
 	ClearedResult = "[This result was cleared to make room in the context window. Call the tool again if you need it.]"
 
 	// lengthFinish is the finish reason of a model turn that filled the room
 	// its window left it.
+	// lengthFinish 是模型 turn 填满其窗口所留空间时的结束原因。
 	lengthFinish = "length"
 )
 
@@ -66,6 +73,7 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		return err
 	}
 	// The run's own exchange follows the history it starts from.
+	// run 自身的 exchange 紧随其起始的历史之后。
 	history := len(conversation)
 	maxTurns := MaxTurns
 	if req.browser != nil {
@@ -73,6 +81,7 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 	}
 	for turn := 1; ; turn++ {
 		// Past the cap the model answers from what it has, with no tools to call.
+		// 超过上限后，模型仅凭已有内容作答，不再调用任何工具。
 		tools := defs
 		if turn > maxTurns {
 			tools = nil
@@ -81,6 +90,8 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 		// An exchange that outgrows the window first drops the results the
 		// model already answered, then compacts the history before it, if the
 		// run has not yet.
+		// 超出窗口的 exchange 会先丢弃模型已应答过的结果，随后（若 run 尚未进行过）
+		// 对其之前的历史做 compaction。
 		if !fits(req, conversation, tools) && (!clearAnswered(conversation[history:]) || !fits(req, conversation, tools)) {
 			exchange := slices.Clone(conversation[history:])
 			if err := compactHistory(ctx, req, fixedCost(req, searching, tools)+tokensOf(exchange)); err != nil {
@@ -122,6 +133,8 @@ func (eng *Engine) loop(ctx context.Context, out *Stream, req *Request, m *infer
 
 // runCaller is who a run's model turns are asked for: the caller whose key
 // they carry, under the run's usage, and whose request the first turn is.
+// runCaller 是 run 的模型 turn 所面向的对象：它们携带其 key 的调用方，
+// 计入该 run 的 usage，且第一个 turn 就是该调用方的请求。
 type runCaller struct {
 	ctx   context.Context
 	usage usagereporting.Context
@@ -140,6 +153,7 @@ func newRunCaller(ctx context.Context, req *Request) *runCaller {
 
 // turnCtx is what the caller's next model turn is asked under: the first
 // bills the caller's request.
+// turnCtx 是调用方下一个模型 turn 所依据的上下文：第一个 turn 会计入调用方的请求。
 func (c *runCaller) turnCtx() context.Context {
 	if c.turns > 1 {
 		return c.ctx
@@ -150,6 +164,7 @@ func (c *runCaller) turnCtx() context.Context {
 }
 
 // ask streams one model turn for the caller.
+// ask 为调用方流式地执行一个模型 turn。
 func (eng *Engine) ask(c *runCaller, out *Stream, m *inference.Model, payload []byte, widgets map[string]domain.Widget) ([]ToolCall, string, error) {
 	c.turns++
 	return eng.turn(c.turnCtx(), out, m, payload, widgets)
@@ -158,6 +173,8 @@ func (eng *Engine) ask(c *runCaller, out *Stream, m *inference.Model, payload []
 // replied is the message a model turn that called tools adds to its run's
 // exchange: its text and calls, and its reasoning when the model's history
 // policy replays it.
+// replied 是调用了工具的模型 turn 加入其 run 的 exchange 中的消息：其文本与调用，
+// 以及当模型的历史策略回放推理时附带其推理内容。
 func replied(out *Stream, req *Request, answer string, calls []ToolCall) json.RawMessage {
 	reply := requested(answer, calls)
 	if req.policy == "all" || req.policy == "tool-call-only" {
@@ -166,6 +183,7 @@ func replied(out *Stream, req *Request, answer string, calls []ToolCall) json.Ra
 		out.mu.Unlock()
 		if reasoning != "" {
 			// Echoed in the field the enclave streamed it in, since vLLM versions disagree on it.
+			// 回填到 enclave 流式输出所用的字段中，因为不同 vLLM 版本对该字段意见不一。
 			value := api.Obj(api.Parsed(reply))
 			value[field] = reasoning
 			reply = api.Raw(value)
@@ -176,6 +194,8 @@ func replied(out *Stream, req *Request, answer string, calls []ToolCall) json.Ra
 
 // compactHistory compacts the chat before a run's exchange to make room for
 // it, once a run. reserved is what the turn's prompt fills besides the chat.
+// compactHistory 对 run 的 exchange 之前的聊天做 compaction 以腾出空间，每个 run 仅一次。
+// reserved 是除聊天外该 turn 的 prompt 所占用的大小。
 func compactHistory(ctx context.Context, req *Request, reserved int) error {
 	compact := req.compact
 	req.compact = nil
@@ -191,6 +211,7 @@ func compactHistory(ctx context.Context, req *Request, reserved int) error {
 }
 
 // tokensOf is what messages fill of a prompt.
+// tokensOf 是这些消息在 prompt 中所占用的 token 数。
 func tokensOf(messages []json.RawMessage) int {
 	tokens := 0
 	for _, message := range messages {
@@ -208,6 +229,9 @@ func errExchangeTooLarge() error {
 // reports whether it cleared any. A result no longer than ClearedResult, such
 // as a widget's or one already cleared, is kept. The reply keeps every result
 // it showed.
+// clearAnswered 将 run 的 exchange 中模型已应答过的每个工具结果（其最新 turn 之前的那些）
+// 替换为 ClearedResult，并报告是否清理过。不短于 ClearedResult 的结果（如 widget 的或已被清理的）
+// 会保留。回复会保留其展示过的每个结果。
 func clearAnswered(exchange []json.RawMessage) bool {
 	latest := len(exchange) - 1
 	for latest >= 0 && role(exchange[latest]) != "assistant" {
@@ -229,6 +253,7 @@ func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([
 		"model":  req.model,
 		"stream": true,
 		// Without this the stream carries no usage chunk and nothing is metered.
+		// 缺少此项时，流中不会携带 usage 分块，也就无法计量。
 		"stream_options":    map[string]any{"include_usage": true},
 		"messages":          conversation,
 		"user_cache_secret": req.cacheScope,
@@ -243,6 +268,7 @@ func body(req *Request, conversation []json.RawMessage, defs json.RawMessage) ([
 }
 
 // Search tools come first, so a caller's turns keep hitting the prompt cache.
+// 搜索工具排在前面，这样调用方的各 turn 能持续命中 prompt 缓存。
 func offer(set *Toolset, rendered []json.RawMessage) (json.RawMessage, error) {
 	var defs []json.RawMessage
 	if set.search != nil {
@@ -276,9 +302,12 @@ func execute(ctx context.Context, out *Stream, set *Toolset, calls []ToolCall) [
 	return messages
 }
 
+// Invoke 执行一个工具调用，并将其结果作为工具消息返回。
 func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (message json.RawMessage) {
 	// One tool goroutine's panic is that call's failure, read by the model like
 	// any other. Nothing is emitted from here: a frame is what may have panicked.
+	// 某个工具 goroutine 的 panic 即该调用的失败，模型会像读其他结果一样读到它。
+	// 这里不会发出任何事件：可能 panic 的是某个 frame。
 	defer func() {
 		if err := api.Rescued("tool "+call.Name, recover()); err != nil {
 			failure, _ := json.Marshal(map[string]string{"error": err.Error()})
@@ -300,12 +329,14 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 		return answered(call.ID, clip(result.Text, MaxToolOutput))
 	}
 	// A widget is drawn by the caller from TOOL_CALL_ARGS; the model just needs a result.
+	// widget 由调用方根据 TOOL_CALL_ARGS 绘制；模型只需要一个结果。
 	if !set.searches(call.Name) {
 		w, ok := set.Widgets[call.Name]
 		if !ok {
 			return answered(call.ID, `{"error":"unknown tool"}`)
 		}
 		// The caller never reports back, so only the model can be told the widget was not drawn.
+		// 调用方从不回报，因此只能告知模型该 widget 未被绘制。
 		if failure := domain.WidgetFailure(w, call.Args); failure != nil {
 			out.emit(domain.ToolCallResult{MessageID: "msg_" + api.Token(), ToolCallID: call.ID, Role: "tool", Content: failure})
 			if !set.retry(call.Name) {
@@ -326,12 +357,15 @@ func Invoke(ctx context.Context, out *Stream, set *Toolset, call ToolCall) (mess
 	out.activity(call)
 	content, meta, err := set.call(ctx, call.Name, call.ID, json.RawMessage(call.Args))
 	// The model reads search results as cited text, the caller as data.
+	// 模型以引用文本的形式读取搜索结果，调用方则以数据的形式读取。
 	read, sources := modelCopy(call.Name, content)
 	out.cite(sources)
 	var shown any
 	if err != nil {
 		// The model reads the failure and can retry rather than the turn dying;
 		// the caller learns only that the call failed, never the tool's own text.
+		// 模型读到失败信息后可以重试，而不必让整个 turn 失败；调用方只会得知调用失败，
+		// 不会看到工具自身的文本。
 		failure, _ := json.Marshal(map[string]string{"error": err.Error()})
 		read, meta, shown = string(failure), nil, json.RawMessage(domain.ToolError)
 	} else {
@@ -374,6 +408,8 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	out.mu.Unlock()
 	// The router has vLLM attach the usage so far to every chunk, so only
 	// the last one a turn streams counts, once the turn ends.
+	// router 让 vLLM 把截至目前的使用量附加到每个分块上，因此只有 turn 结束前
+	// 流式输出的最后一个分块才被计入。
 	var usage json.RawMessage
 	defer func() {
 		if len(usage) > 0 {
@@ -450,6 +486,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		delta := chunk.Choices[0].Delta
 		// Reasoning first: at the think-close boundary one delta carries the last
 		// of the reasoning and the first of the answer.
+		// 推理优先：在思考结束的边界上，一个 delta 会同时携带推理的结尾与回答的开头。
 		if reasoning := cmp.Or(delta.Reasoning, delta.ReasoningAlt); reasoning != "" {
 			if delta.Reasoning == "" {
 				reasoningField = "reasoning"
@@ -469,6 +506,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 		}
 	}
 	// A cut stream leaves its calls open: TOOL_CALL_END would mark truncated arguments complete.
+	// 被截断的流会使其调用保持开启状态：TOOL_CALL_END 会把截断的参数标记为完整。
 	if err := events.Err(); err != nil {
 		return calls, answer.String(), err
 	}
@@ -477,6 +515,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	}
 	// A turn cut off at the end of the window ends the reply there. Its calls
 	// stay open, as a cut stream's do, and none of them runs.
+	// 在窗口末端被截断的 turn 会在此处结束回复。其调用保持开启（同被截断的流一样），且不会执行。
 	if cutOff {
 		out.mu.Lock()
 		out.truncated = true
@@ -493,6 +532,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 			c.Args = domain.WidgetArguments(c.Args)
 		}
 		// The enclave reads absent arguments as none; the caller should too.
+		// enclave 会把缺失的参数读作无；调用方也应如此。
 		if c.Args == "" {
 			out.callArgs(c.ID, "{}")
 		} else if !shown {
@@ -503,6 +543,7 @@ func (eng *Engine) turn(ctx context.Context, out *Stream, m *inference.Model, pa
 	return calls, answer.String(), nil
 }
 
+// ToolCall 是模型发起的一次工具调用。
 type ToolCall struct {
 	ID, Name, Args string
 	open           bool
@@ -519,6 +560,7 @@ type toolCallDelta struct {
 }
 
 // A turn that opens with a tool call has no message to hang it on.
+// 以工具调用开头的 turn 没有可挂靠的消息。
 func parent(message string, answer *strings.Builder) string {
 	if answer.Len() == 0 {
 		return ""
@@ -527,6 +569,7 @@ func parent(message string, answer *strings.Builder) string {
 }
 
 // Arguments that arrive before the name are sent once the call opens.
+// 先于名称到达的参数会在调用开启时发送。
 func announce(out *Stream, message string, calls []ToolCall, delta toolCallDelta, widgets map[string]domain.Widget) []ToolCall {
 	for len(calls) <= delta.Index {
 		calls = append(calls, ToolCall{ID: "call_" + api.Token()})

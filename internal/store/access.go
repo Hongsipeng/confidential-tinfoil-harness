@@ -1,3 +1,4 @@
+// Package store 实现 chat 访问权限的构造与续期。
 package store
 
 import (
@@ -15,6 +16,9 @@ import (
 // aloud, carry. A subscriber's chat token is renewed by the control plane
 // for as long as the run or the reading lasts, as the user its client's
 // session proved; a free key or an API key is carried as it is.
+// ChatAccess 表示一次 run 或一次朗读的 reply 所携带的 chat 访问权限。订阅者的 chat token
+// 在 run 或朗读期间由 control plane 持续续期，正如其客户端 session 已证明的用户身份；
+// 免费 key 或 API key 则原样携带。
 func (s *Store) ChatAccess(authenticator *auth.Authenticator, p *auth.Principal, credential auth.Credential) *auth.Access {
 	if !credential.FirstParty {
 		return auth.NewAccess(credential, nil)
@@ -37,6 +41,8 @@ func (s *Store) ChatAccess(authenticator *auth.Authenticator, p *auth.Principal,
 // reading it was for ends saying. Only an account that may no longer chat is
 // told to stop: an answer the control plane could not give is worth another
 // try.
+// accessRefused 表示 chat 访问未能续期的原因，会作为其所属 run 或朗读结束时的说明。
+// 只有不再允许聊天的账户才会被告知停止：control plane 无法给出的应答值得再试一次。
 func accessRefused(err error) *api.Error {
 	slog.Warn("chat access was not renewed", "error", err)
 	var refused *controlplane.Error

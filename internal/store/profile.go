@@ -1,3 +1,4 @@
+// Package store 读取用户的 profile 设置。
 package store
 
 import (
@@ -8,6 +9,7 @@ import (
 )
 
 // Profile is a user's settings as a prompt reads them.
+// Profile 是 prompt 所读取的用户设置。
 func (s *Store) Profile(ctx context.Context, p *auth.Principal, key auth.ContentKey) (domain.Profile, error) {
 	stored, err := s.LoadProfile(ctx, p, key)
 	if err != nil || stored == nil {

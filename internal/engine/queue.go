@@ -8,6 +8,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/auth"
 )
 
+// CancelThread 取消聊天正在运行的回复，或移除一个排队的 turn。
 func (eng *Engine) CancelThread(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *RunRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
@@ -32,6 +33,7 @@ func (eng *Engine) CancelThread(ctx context.Context, p *auth.Principal, _ auth.C
 }
 
 // Move the selected queued turn first, then finish the active run normally.
+// 将选中的排队 turn 移到最前面，然后正常结束活动的 run。
 func (eng *Engine) SendQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *RunRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
@@ -52,6 +54,7 @@ func (eng *Engine) SendQueued(ctx context.Context, p *auth.Principal, _ auth.Con
 	s.Queue = append([]*Run{r}, slices.Delete(s.Queue, index, index+1)...)
 	queueChanged(s)
 	// A reply already stopped and finishing still hands the chat on.
+	// 已经停止、正在收尾的回复仍会把聊天交接下去。
 	s.Active.yielded = true
 	if !s.Active.ending {
 		s.Active.cancelled = true
@@ -61,6 +64,7 @@ func (eng *Engine) SendQueued(ctx context.Context, p *auth.Principal, _ auth.Con
 	return struct{}{}, nil
 }
 
+// RemoveQueued 移除聊天队列中的一个 turn。
 func (eng *Engine) RemoveQueued(ctx context.Context, p *auth.Principal, _ auth.ContentKey, in *RunRequest) (any, error) {
 	key, err := auth.RequestKey(in.Key)
 	if err != nil {
@@ -81,6 +85,7 @@ func (eng *Engine) RemoveQueued(ctx context.Context, p *auth.Principal, _ auth.C
 
 // removeQueued ends a turn still waiting in its chat's queue, and reports
 // whether it was waiting; live.mu is held.
+// removeQueued 结束仍在聊天队列中等待的 turn，并报告它是否在等待；调用时持有 live.mu。
 func (eng *Engine) removeQueued(r *Run) bool {
 	s := r.Thread
 	index := slices.Index(s.Queue, r)
@@ -97,6 +102,7 @@ func (eng *Engine) removeQueued(r *Run) bool {
 
 // StopThread stops a chat being deleted: its running reply is cancelled and
 // each queued turn ends.
+// StopThread 停止一个正在被删除的聊天：其运行中的回复被取消，每个排队的 turn 都会结束。
 func (eng *Engine) StopThread(p *auth.Principal, id string) {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
@@ -108,6 +114,8 @@ func (eng *Engine) StopThread(p *auth.Principal, id string) {
 // StopDeviceThread stops a device chat its client deleted, as StopThread
 // stops a chat, and drops the replies kept of it. A request that names a
 // device chat carries no content key, so it stops nothing else.
+// StopDeviceThread 停止客户端已删除的设备聊天，如同 StopThread 停止一个聊天那样，
+// 并丢弃为其保留的回复。指定设备聊天的请求不携带 content key，因此它不会停止其他任何东西。
 func (eng *Engine) StopDeviceThread(p *auth.Principal, id string) {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
@@ -120,6 +128,8 @@ func (eng *Engine) StopDeviceThread(p *auth.Principal, id string) {
 // StopDeviceThreads stops every device chat of the caller, as
 // StopDeviceThread stops one, when the caller deletes them all. It returns
 // how many chats it held anything of.
+// StopDeviceThreads 在调用方删除其所有设备聊天时，如同 StopDeviceThread 停止一个那样
+// 停止调用方的每一个设备聊天。它返回为其保留了内容的聊天数量。
 func (eng *Engine) StopDeviceThreads(p *auth.Principal) int {
 	eng.Live.mu.Lock()
 	defer eng.Live.mu.Unlock()
@@ -142,9 +152,11 @@ func (eng *Engine) StopDeviceThreads(p *auth.Principal) int {
 
 // isDevice reports whether a chat is kept by its client's device, which
 // sends it with each turn and needs no content key.
+// isDevice 报告聊天是否由其客户端设备保存，设备会随每个 turn 发送它，并且不需要 content key。
 func isDevice(s *threadSession) bool { return s.local && s.keyless }
 
 // stop ends what a chat being deleted runs; live.mu is held.
+// stop 结束正在被删除的聊天所运行的内容；调用时持有 live.mu。
 func (eng *Engine) stop(s *threadSession) {
 	s.deleted = true
 	if s.Active != nil {

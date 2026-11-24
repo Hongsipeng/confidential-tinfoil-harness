@@ -24,6 +24,7 @@ import (
 	"golang.org/x/text/language/display"
 )
 
+// Request 是一个 turn 所构建的模型请求：它携带该 turn 的 prompt、工具与配置。
 type Request struct {
 	browser                    *browserSession
 	compact                    func(context.Context, int) error // compacts the chat, once, when its prompt would not fit
@@ -47,6 +48,9 @@ type Request struct {
 	// latest compaction marker, the first carrying the marker's summary.
 	// history is every message but the markers, as the safeguards classify
 	// the chat. Both are read from messages, the chat as the prompt reads it.
+	// Groups 是模型读取的历史：聊天最新 compaction 标记之后的每条消息，其中第一条携带该标记的摘要。
+	// history 是除标记外的所有消息，供 safeguards 对聊天进行分类。
+	// 二者都从 messages 中读取，即 prompt 所读取的聊天。
 	history  [][]json.RawMessage
 	messages []domain.Message
 	vision   bool
@@ -54,6 +58,8 @@ type Request struct {
 	// The reminder closing the prompt gives the clock, then how much of the
 	// budget the prompt fills, and whether a full chat is compacted, then
 	// the turn's instruction.
+	// 收尾 prompt 的提醒会给出当前时间，随后是该 prompt 占用了多少预算，以及整个聊天是否
+	// 已被 compact，最后是该 turn 的指令。
 	clock, instruction string
 	compacts           bool
 	usage              *domain.ContextUsage // what the prompt fills, as the reminder and the chat state it
@@ -65,6 +71,10 @@ type Request struct {
 // must hold something besides the credential: the client's secret, or the
 // chat id. Signed-out callers behind one address hold the same free key, so
 // neither is the key alone.
+// cacheScope 是聊天的各 turn 所共享的 prompt 缓存：同一客户端的各聊天靠其发送的 secret 区分，
+// 未发送 secret 时则只有单个聊天。router 用该 scope 为 engine 的 prompt 缓存加盐，因此它必须
+// 携带 credential 之外的信息：客户端的 secret，或聊天 id。同一地址之后的未登录调用方持有相同的
+// 免费 key，因此不能只用 key。
 func cacheScope(p *auth.Principal, threadID, clientSecret string) string {
 	scope := p.Scope() + "\x00client:" + clientSecret
 	if clientSecret == "" {
@@ -75,9 +85,11 @@ func cacheScope(p *auth.Principal, threadID, clientSecret string) string {
 }
 
 // imageTokens is what one image costs; sizing its base64 as text fits nothing.
+// imageTokens 是一张图片的代价；把其 base64 当作文本无法估算大小。
 const imageTokens = 1500
 
 // promptLanguage is the language a prompt names for a user who chose none.
+// promptLanguage 是未选择语言的用户其 prompt 所指定的语言。
 const promptLanguage = "English"
 
 const askInstruction = "The user highlighted a snippet from the prior conversation and wants you to elaborate on, clarify, or expand on that specific snippet. Use the prior conversation only as background context and focus your answer on the selected snippet."
@@ -182,6 +194,7 @@ func timeReminder(now time.Time, loc *time.Location) string {
 
 // contextReminder tells the model how much of the prompt budget its prompt
 // fills, as the chat's context usage tells the user.
+// contextReminder 告诉模型其 prompt 占用了多少 prompt 预算，正如聊天的上下文用量告诉用户的那样。
 func contextReminder(usage *domain.ContextUsage, compacts bool) string {
 	text := fmt.Sprintf("Context used: %d%% of the room this conversation may fill (~%s of %s tokens).", int(math.Round(usage.Percentage)), thousands(usage.UsedTokens), thousands(usage.LimitTokens))
 	if compacts {
@@ -191,6 +204,7 @@ func contextReminder(usage *domain.ContextUsage, compacts bool) string {
 }
 
 // thousands is a token count in thousands, as the clients show it.
+// thousands 是以千为单位的 token 数，正如客户端所显示的那样。
 func thousands(tokens int) string {
 	if tokens < 1000 {
 		return strconv.Itoa(tokens)
@@ -201,6 +215,8 @@ func thousands(tokens int) string {
 // remind counts what the prompt now fills, and sets the reminder that closes
 // it to say so. The count leaves out the reminder's own statement of it, so
 // the model and the user are told the same share.
+// remind 统计 prompt 当前占用的内容，并设置收尾提醒来说明这一点。统计结果不含提醒自身的
+// 说明文字，这样模型和用户被告知的是相同的占比。
 func (req *Request) remind() {
 	reminder := func(context string) json.RawMessage {
 		return api.Raw(api.Object{"role": "user", "content": "<system-reminder>" + req.clock + context + "</system-reminder>" + req.instruction})
@@ -214,6 +230,8 @@ func (req *Request) remind() {
 // given in. It is read from the stored time, never the clock, so every turn
 // renders the history alike and keeps hitting the prompt cache. A message
 // without a readable time has none.
+// sentReminder 是问题被提出时的提醒，使用当前时间所在的时区。它读取的是存储的时间而非时钟，
+// 这样每个 turn 渲染的历史都一致，并能持续命中 prompt 缓存。没有可读时间的消息则没有该提醒。
 func sentReminder(createdAt string, loc *time.Location) string {
 	sent, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
@@ -222,6 +240,7 @@ func sentReminder(createdAt string, loc *time.Location) string {
 	return "<system-reminder>Sent: " + englishTime(sent.In(loc), loc.String()) + "</system-reminder>"
 }
 
+// BuildRequest 根据聊天、profile、project 与 turn 输入构建该 turn 的模型请求。
 func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, project *domain.Project, documents []domain.ProjectDocument, in *TurnRequest, usageID string) (*Request, *inference.Model, error) {
 	c := eng.Models.Catalog.Get()
 	options := in.Options
@@ -279,11 +298,13 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	req.clock, req.compacts = timeReminder(api.Now(), loc), eng.Summaries.Ready(summarize.Compaction)
 	// As the web client does, the continue instruction shares the reminder's
 	// turn: some chat templates refuse two user messages in a row.
+	// 与 web 客户端一样，continue 指令与提醒共用同一个 turn：有些聊天模板不允许连续两条 user 消息。
 	if in.Kind == "continue" {
 		req.instruction += "\n\n" + ContinueInstruction
 	}
 	// An ask's instruction follows the history too, so its prompt starts as
 	// the chat it asks about does and reuses that chat's prompt cache.
+	// ask 的指令同样跟在历史之后，这样其 prompt 的起始与其所询问的聊天一致，并能复用该聊天的 prompt 缓存。
 	if in.Kind == "ask" {
 		req.instruction += "\n\n" + askInstruction
 	}
@@ -295,9 +316,11 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	req.window, req.policy = window, policy
 	req.piiCheck = domain.ValueOr(options.PIICheck, domain.ValueOr(profile.PIICheckEnabled, true))
 	// Turning web search off in the settings leaves each chat's own setting.
+	// 在设置中关闭 web 搜索后，将沿用每个聊天自己的设置。
 	req.webSearch = domain.ValueOr(profile.WebSearchAvailable, true) && domain.ValueOr(options.WebSearch, thread.WebSearchEnabled)
 	// A research searches the web whatever the chat's setting, unless the
 	// settings turn web search off.
+	// research 无论聊天的设置如何都会搜索网页，除非设置中关闭了 web 搜索。
 	if researches(thread, in.Kind) {
 		if !domain.ValueOr(profile.WebSearchAvailable, true) {
 			return nil, nil, api.Err(403, "TOOL_UNAVAILABLE", "Deep research needs web search, which the settings turn off").WithAction(api.ActionStop)
@@ -310,6 +333,7 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 	widgets := c.SelectedWidgets(in.Widgets, domain.ValueOr(options.GenUI, domain.ValueOr(profile.GenUIEnabled, true)))
 	// A research offers no widget but the questions it may ask first and the
 	// artifact it writes its report in.
+	// research 只提供它可能先提出的问题 widget，以及写报告所用的 artifact widget。
 	if req.research {
 		widgets = slices.DeleteFunc(widgets, func(w domain.Widget) bool {
 			return w.Name != domain.ArtifactWidget && (w.Name != domain.QuestionsWidget || !asksFirst(thread.Messages))
@@ -330,6 +354,8 @@ func (eng *Engine) BuildRequest(thread *domain.Thread, profile *domain.Profile, 
 
 // render reads the chat into the history the model reads, from its latest
 // compaction marker on, and into the history the safeguards classify.
+// render 将聊天读入模型所读取的历史（从其最新 compaction 标记起），
+// 以及 safeguards 所分类的历史。
 func (req *Request) render() {
 	req.Groups, req.history, req.costs = nil, nil, nil
 	latest := domain.LatestCompaction(req.messages)
@@ -350,15 +376,19 @@ func (req *Request) render() {
 }
 
 // compactedNote tells the model what a compaction marker's summary is.
+// compactedNote 告诉模型 compaction 标记的摘要是什么。
 const compactedNote = "The earlier part of this conversation was compacted into this summary to fit the context window. Treat it as your memory of those messages. Files, images and pages from that part are no longer available; ask the user to share them again if you need their exact content. Do not mention this summary unless the user asks about earlier messages."
 
 // summaryTags are the tags the summary is wrapped in, which its own text
 // cannot close.
+// summaryTags 是摘要所包裹的标签，摘要自身的文本无法闭合它们。
 var summaryTags = regexp.MustCompile(`(?i)<(/?conversation_summary)`)
 
 // withSummary puts a compaction marker's summary at the start of the history
 // that follows it: in the question that opens it, so no two user messages
 // follow each other, or alone before a reply that opens it.
+// withSummary 将 compaction 标记的摘要放到其后的历史开头：放在开启它的问题中（避免两条 user
+// 消息相邻），或者单独放在开启它的回复之前。
 func withSummary(groups [][]json.RawMessage, summary string) [][]json.RawMessage {
 	text := "<conversation_summary>\n" + compactedNote + "\n\n" + summaryTags.ReplaceAllString(summary, "&lt;$1") + "\n</conversation_summary>"
 	if len(groups) == 0 || role(groups[0][0]) != "user" {
@@ -374,6 +404,7 @@ func withSummary(groups [][]json.RawMessage, summary string) [][]json.RawMessage
 	return append([][]json.RawMessage{first}, groups[1:]...)
 }
 
+// RenderMessage 将一条消息渲染为模型所读取的原始消息序列。
 func RenderMessage(message *domain.Message, vision bool, policy string, loc *time.Location) []json.RawMessage {
 	if message.Role == "user" {
 		return []json.RawMessage{api.Raw(api.Object{"role": "user", "content": userContent(message, vision, loc)})}
@@ -382,6 +413,7 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 	calls, results := []api.Object{}, []json.RawMessage{}
 	for _, block := range message.Timeline {
 		// A research's reply is read back as its report alone.
+		// research 的回复只读回其报告本身。
 		if message.Research != nil && !reportBlock(block) {
 			continue
 		}
@@ -393,6 +425,7 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 		case "tool_call":
 			// A stopped reply's call that never finished never ran, so the
 			// model is not told it did.
+			// 被停止的回复中未完成的调用从未执行，因此不会告诉模型它执行过。
 			if !block.Complete && block.Result == nil && domain.ValueOr(message.IsInterrupted, false) {
 				continue
 			}
@@ -401,6 +434,7 @@ func RenderMessage(message *domain.Message, vision bool, policy string, loc *tim
 			result := "executed"
 			if block.Result != nil && !strings.HasPrefix(block.Name, "render_") {
 				// Results are replayed as the harness has always written them.
+				// 结果按 harness 一贯写入的形式回放。
 				value := api.Parsed(block.Result)
 				if text, ok := value.(string); ok {
 					result = text
@@ -509,6 +543,7 @@ func messageTokens(message json.RawMessage) int {
 }
 
 // groupCosts counts each history group's tokens the first time a turn asks.
+// groupCosts 在 turn 首次询问时统计每个历史分组的 token 数。
 func (req *Request) groupCosts() []int {
 	if req.costs == nil {
 		req.costs = make([]int, len(req.Groups))
@@ -523,10 +558,13 @@ func (req *Request) groupCosts() []int {
 
 // limit is the share of the model's window a prompt may fill, which leaves
 // the rest to the reply.
+// limit 是 prompt 可占用的模型窗口比例，其余空间留给回复。
 func (req *Request) limit() int { return req.window * 4 / 5 }
 
 // toolInstructions are what a turn's system prompt says of the web search
 // it offers: how to research, for a research.
+// toolInstructions 是该 turn 的 system prompt 就其提供的 web 搜索所做的说明：
+// 对 research 而言即如何开展研究。
 func (req *Request) toolInstructions(searching bool) string {
 	switch {
 	case req.research:
@@ -538,6 +576,7 @@ func (req *Request) toolInstructions(searching bool) string {
 }
 
 // system is the system prompt a turn sends.
+// system 是 turn 所发送的 system prompt。
 func (req *Request) system(searching bool) string {
 	system := req.System
 	if instructions := req.toolInstructions(searching); instructions != "" {
@@ -551,12 +590,14 @@ func (req *Request) system(searching bool) string {
 
 // fixedCost is what a turn's prompt fills before its history: the system
 // prompt, the tools and the reminder.
+// fixedCost 是 turn 的 prompt 在其历史之前所填充的内容：system prompt、工具和提醒。
 func fixedCost(req *Request, searching bool, definitions json.RawMessage) int {
 	return inference.Tokens(req.system(searching)) + inference.Tokens(string(definitions)) + messageTokens(req.reminder) + 8
 }
 
 // fits reports whether a prompt and the tools it offers fill no more of the
 // window than a prompt may.
+// fits 报告某个 prompt 及其提供的工具是否未超过 prompt 可占用的窗口大小。
 func fits(req *Request, messages []json.RawMessage, definitions json.RawMessage) bool {
 	cost := inference.Tokens(string(definitions))
 	for _, message := range messages {
@@ -567,6 +608,7 @@ func fits(req *Request, messages []json.RawMessage, definitions json.RawMessage)
 
 // promptOf is a turn's prompt: the system prompt, the history the model
 // reads, and the reminder.
+// promptOf 是 turn 的 prompt：system prompt、模型读取的历史以及提醒。
 func promptOf(req *Request, searching bool) []json.RawMessage {
 	messages := []json.RawMessage{}
 	if system := req.system(searching); strings.TrimSpace(system) != "" {
@@ -580,6 +622,7 @@ func promptOf(req *Request, searching bool) []json.RawMessage {
 
 // BudgetConversation is a turn's prompt, refused when it fills more of the
 // window than a prompt may.
+// BudgetConversation 是 turn 的 prompt，当其占用超过 prompt 可用的窗口时会被拒绝。
 func BudgetConversation(req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
 	if fixedCost(req, searching, definitions) > req.limit() {
 		return nil, api.Err(413, "CONTEXT_TOO_LARGE", "The system and tools exceed the context window")
@@ -593,6 +636,7 @@ func BudgetConversation(req *Request, searching bool, definitions json.RawMessag
 
 // fitted is a turn's prompt, compacting the chat first when the prompt
 // would not fit.
+// fitted 是 turn 的 prompt，当 prompt 无法放入时会先对聊天做 compaction。
 func fitted(ctx context.Context, req *Request, searching bool, definitions json.RawMessage) ([]json.RawMessage, error) {
 	messages, err := BudgetConversation(req, searching, definitions)
 	if err == nil || fixedCost(req, searching, definitions) > req.limit() || req.compact == nil {
@@ -609,6 +653,7 @@ func fitted(ctx context.Context, req *Request, searching bool, definitions json.
 }
 
 // role is who wrote a model message.
+// role 是模型消息的撰写者（role 字段）。
 func role(message json.RawMessage) string {
 	var m struct {
 		Role string `json:"role"`
@@ -638,12 +683,16 @@ func englishTime(now time.Time, zone string) string {
 
 // summaryReserve is the room a compaction marker's summary takes in a
 // prompt: about the 2,500 words its task asks for at most.
+// summaryReserve 是 compaction 标记的摘要在 prompt 中所占的空间：大约是其任务所要求的
+// 最多 2,500 个词。
 const summaryReserve = 4096
 
 // preflightBudget refuses a turn whose prompt does not fit and would not fit
 // even once its chat is compacted: one whose system prompt and tools, or
 // whose question beside a summary of the messages before it, fill more of
 // the window than a prompt may.
+// preflightBudget 拒绝那些 prompt 放不下、且即使聊天被 compact 之后也放不下的 turn：
+// 即其 system prompt 和工具，或其问题加上之前消息的摘要，超过了 prompt 可用的窗口。
 func preflightBudget(req *Request) error {
 	definitions := api.Raw(req.rendered)
 	if _, err := BudgetConversation(req, req.webSearch, definitions); err == nil {
@@ -673,6 +722,8 @@ func preflightBudget(req *Request) error {
 // requestContextUsage is what the turn's prompt fills, before its tools run,
 // of the share of the window a prompt may fill. It may pass that share, which
 // the turn's compaction then brings it back under.
+// requestContextUsage 是该 turn 的 prompt 在其工具运行之前，占 prompt 可用窗口的比例。
+// 它可能超过该比例，之后该 turn 的 compaction 会将其拉回。
 func requestContextUsage(req *Request) *domain.ContextUsage {
 	system := req.System + "\n\n" + req.widgetHint
 	if instructions := req.toolInstructions(req.webSearch); instructions != "" {

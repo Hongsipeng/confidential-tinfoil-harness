@@ -1,3 +1,4 @@
+// 本文件处理 widget 调用的参数校验、规范化与结果。
 package domain
 
 import (
@@ -15,14 +16,18 @@ import (
 
 // MaxWidgetRetries bounds how often one run tells the model a widget's
 // arguments failed validation; two cover fixing one field surfacing another.
+// MaxWidgetRetries 限制一次 run 告知模型 widget 参数校验失败的次数；两次足以覆盖“修好一个
+// 字段又暴露另一个字段”的情形。
 const MaxWidgetRetries = 2
 
 // ArtifactWidget is the widget that shows a document, page or site in a side
 // panel.
+// ArtifactWidget 是在侧边栏展示文档、页面或站点的 widget。
 const ArtifactWidget = "render_artifact_preview"
 
 // WidgetArguments is what a widget call is drawn and validated with: repaired,
 // then canonical.
+// WidgetArguments 返回 widget 调用绘制与校验所用的参数：先修复，再做规范化。
 func WidgetArguments(raw string) string {
 	if repaired, ok := SanitizeToolCallArgumentsJSON([]byte(raw)); ok && json.Valid(repaired) {
 		raw = string(repaired)
@@ -34,6 +39,9 @@ func WidgetArguments(raw string) string {
 // strings, such as DeepSeek's {"stats":"[{...}]"}, which widget schemas
 // reject. Arguments that need no unwrapping come back byte-for-byte, and
 // anything that does not parse comes back untouched.
+// CanonicalizeWidgetArguments 展开以 JSON 字符串发送的嵌套数组与对象（如 DeepSeek 的
+// {"stats":"[{...}]"}），这些内容会被 widget 的 schema 拒绝。无需展开的参数会逐字节原样
+// 返回，无法解析的内容也原样返回。
 func CanonicalizeWidgetArguments(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed[0] != '{' && trimmed[0] != '[' {
@@ -56,6 +64,8 @@ func CanonicalizeWidgetArguments(raw string) string {
 
 // deepUnwrapJSONStrings replaces every string holding a JSON array or object
 // with its decoded value, reporting whether any was replaced.
+// deepUnwrapJSONStrings 把每个持有 JSON 数组或对象的字符串替换为其解码后的值，并报告是否
+// 有任一被替换。
 func deepUnwrapJSONStrings(value any) (any, bool) {
 	switch v := value.(type) {
 	case string:
@@ -90,6 +100,7 @@ func deepUnwrapJSONStrings(value any) (any, bool) {
 }
 
 // decodeJSONValue keeps numbers exact and refuses trailing data.
+// decodeJSONValue 精确保留数字，并拒绝末尾多余的数据。
 func decodeJSONValue(raw string) (any, error) {
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.UseNumber()
@@ -109,6 +120,7 @@ func decodeJSONValue(raw string) (any, error) {
 
 // WidgetFailure is what a widget call whose arguments cannot be drawn
 // returns, or nil when they can.
+// WidgetFailure 返回参数无法绘制的 widget 调用的失败结果；参数可用时为 nil。
 func WidgetFailure(w Widget, args string) json.RawMessage {
 	var value any
 	problem := "arguments are not valid JSON"
@@ -128,6 +140,8 @@ func WidgetFailure(w Widget, args string) json.RawMessage {
 // CheckedWidgets is a copy of a timeline for its client, in which each widget
 // call is marked when its stored arguments fail the check new ones pass
 // before they are sent.
+// CheckedWidgets 返回发送给客户端的 timeline 副本，其中每个 widget 调用若其已存储参数
+// 无法通过新参数发送前所做的校验，就会被标记。
 func CheckedWidgets(timeline []Block) []Block {
 	checked := clonedSlice(timeline)
 	for i := range checked {
@@ -146,6 +160,7 @@ func CheckedWidgets(timeline []Block) []Block {
 }
 
 // CheckWidgets marks the widget calls of a thread its client is sent.
+// CheckWidgets 标记发送给客户端的 thread 中的 widget 调用。
 func (t *Thread) CheckWidgets() {
 	for i := range t.Messages {
 		t.Messages[i].Timeline = CheckedWidgets(t.Messages[i].Timeline)
@@ -157,6 +172,8 @@ func resolveSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 	// zod-to-json-schema's OpenAPI target uses draft-4 exclusive bounds.
 	// Keep the advertised schema identical to the client reference and convert
 	// those bounds for the draft-2020 validator.
+	// zod-to-json-schema 的 OpenAPI 目标使用 draft-4 的排他边界。对外发布的 schema 保持
+	// 与客户端参考一致，并为 draft-2020 校验器转换这些边界。
 	var normalized any
 	if err := json.Unmarshal(raw, &normalized); err != nil {
 		return nil, err
@@ -188,6 +205,7 @@ func normalizeSchema(value any) {
 		}
 		// As the client's schemas did, a field no property declares is
 		// ignored rather than refused.
+		// 与客户端 schema 一样，未被任何 property 声明的字段会被忽略而非拒绝。
 		if open, ok := node["additionalProperties"].(bool); ok && !open {
 			delete(node, "additionalProperties")
 		}
@@ -209,6 +227,8 @@ func normalizeSchema(value any) {
 
 // NormalizeToolResult is the caller's copy of a tool result. Its text shares
 // one budget, spent after parsing so that a large result still parses.
+// NormalizeToolResult 返回调用方看到的工具结果副本。其文本共享一份预算，并在解析之后才
+// 扣除，这样即使结果很大也仍能解析。
 func NormalizeToolResult(name, arguments, content string) any {
 	var result any
 	if json.Unmarshal([]byte(content), &result) != nil {
@@ -263,6 +283,7 @@ func NormalizeToolResult(name, arguments, content string) any {
 			text := take(api.FirstString(page["content"], page["text"]))
 			if len(pages) == 0 {
 				// Shown twice, as the result and as its first page, so spent twice.
+				// 既作为结果、又作为第一页展示，因此预算扣除两次。
 				shown["url"], shown["text"] = url, take(text)
 			}
 			pages = append(pages, api.Object{"url": url, "title": "Fetched page", "text": text})
@@ -296,6 +317,8 @@ func NormalizeToolResult(name, arguments, content string) any {
 // piiReport is what the privacy filter masked from a search's query, in the
 // model router's shape. Offsets are code points into the query the model
 // sent; the removed text itself never leaves the enclave.
+// piiReport 是隐私过滤器从搜索 query 中屏蔽掉的内容，采用模型 router 的结构。偏移量是
+// 模型所发送 query 中的码点下标；被删除的文本本身绝不会离开 enclave。
 func piiReport(result api.Object) api.Object {
 	offset := func(v any) (int64, bool) {
 		f, ok := v.(float64)
@@ -323,6 +346,8 @@ type ReplacedWidget struct {
 
 // A retry must not revive a deleted widget or overwrite a concurrent writer.
 // expected is the widget's arguments when the retry started.
+// 重试不得复活已删除的 widget，也不得覆盖并发的写入者。expected 是重试开始时该 widget 的
+// 参数。
 func ReplaceWidget(t *Thread, messageID, callID, expected string, replacement ReplacedWidget) error {
 	for i := range t.Messages {
 		m := &t.Messages[i]
@@ -338,6 +363,7 @@ func ReplaceWidget(t *Thread, messageID, callID, expected string, replacement Re
 				return api.Err(409, "REVISION_CONFLICT", "The widget changed during its retry")
 			}
 			// Answers belong to the questions the user was shown.
+			// Answers 属于用户所见到的那些题目。
 			block.Arguments, block.Result, block.Answers = replacement.Arguments, replacement.Result, nil
 			return nil
 		}
@@ -347,13 +373,17 @@ func ReplaceWidget(t *Thread, messageID, callID, expected string, replacement Re
 
 const (
 	// MaxShownOutput bounds a tool result as the caller sees it.
+	// MaxShownOutput 限制调用方可见的工具结果大小。
 	MaxShownOutput = 1 << 20
 	// ToolError is the result of a tool call that failed.
+	// ToolError 是工具调用失败时的结果。
 	ToolError = `{"error":"tool_error"}`
 )
 
 // HistoryArgs is what a replayed tool call carries: one call whose arguments
 // do not parse would otherwise fail every later request that repeats it.
+// HistoryArgs 是重放工具调用所携带的参数：若某次调用的参数无法解析，会让之后重复它的每个
+// 请求都失败。
 func HistoryArgs(s string) string {
 	if json.Valid([]byte(s)) {
 		return s

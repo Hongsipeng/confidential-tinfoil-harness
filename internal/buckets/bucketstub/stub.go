@@ -6,6 +6,11 @@
 // are namespaced by tenant, and GET verifies the supplied key matches
 // the one declared at PUT — the same model the real sidecar uses (a
 // wrong key surfaces as a 400 DecryptionFailed instead of decrypting).
+// 包 bucketstub 是并置的 tinfoil-buckets-sidecar 的 S3 兼容 API 的内存替身。它只实现了
+// enclave 的 buckets.Client 所用到的那部分接口：path-style 的 PutObject/GetObject/DeleteObject，
+// 且都受多租户 X-Tinfoil-Tenant-Id 与 X-Tinfoil-Encryption-Key header 的门控。对象按 tenant
+// 划分命名空间，GET 会校验所提供的 key 与 PUT 时声明的 key 一致——这与真实 sidecar 使用的
+// 模型相同（错误的 key 会表现为 400 DecryptionFailed，而不是直接解密）。
 package bucketstub
 
 import (
@@ -25,6 +30,8 @@ const (
 	// The real sidecar streams to object storage; the stub holds
 	// everything in memory, so an unbounded read would let a
 	// misconfigured or hostile client OOM the test harness.
+	// maxStubPlaintextBytes 限制 stub 会缓冲的对象体积。真实 sidecar 是流式写入对象存储；stub 则把
+	// 所有内容都保存在内存中，因此不受限制的读取可能让配置错误或恶意的客户端把测试 harness 的内存耗尽（OOM）。
 	maxStubPlaintextBytes = 256 << 20
 
 	headerTenantID      = "X-Tinfoil-Tenant-Id"
@@ -34,6 +41,7 @@ const (
 
 var tenantIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// Store 是 stub 的状态，保存按 token 索引的对象。
 type Store struct {
 	mu    sync.Mutex
 	items map[string]Item
@@ -42,6 +50,7 @@ type Store struct {
 // Item is a stored object. Tenant namespaces it; Value is the
 // plaintext; EncryptionKeys holds the key it was sealed under so GET
 // can reject a mismatched key.
+// Item 是一个已存储的对象。Tenant 为其命名空间；Value 是明文；EncryptionKeys 保存密封它所用的 key，这样 GET 就能拒绝不匹配的 key。
 type Item struct {
 	Tenant         string
 	Value          []byte
@@ -51,6 +60,7 @@ type Item struct {
 	PartSize       int64
 }
 
+// NewStore 返回一个空的 Store。
 func NewStore() *Store {
 	return &Store{items: map[string]Item{}}
 }
@@ -58,6 +68,7 @@ func NewStore() *Store {
 // Put pre-seeds an object by token. Tests use it to stage attachments
 // without going through an HTTP PUT; set Item.Tenant to the owning
 // user's tenant so tenant-scoped GET/DELETE address it.
+// Put 按 token 预置一个对象。测试用它来暂存附件，而不必真正发起 HTTP PUT；将 Item.Tenant 设为所属用户的 tenant，这样按 tenant 隔离的 GET/DELETE 就能访问到它。
 func (s *Store) Put(token string, item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,6 +86,7 @@ func (s *Store) Put(token string, item Item) {
 
 // Has reports whether any tenant holds the token. Attachment ids are
 // globally unique, so tests assert presence by token alone.
+// Has 报告是否有任何 tenant 持有该 token。附件 id 是全局唯一的，因此测试仅凭 token 即可断言其存在。
 func (s *Store) Has(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,6 +94,7 @@ func (s *Store) Has(token string) bool {
 	return ok
 }
 
+// Item 返回 token 对应的对象副本及其是否存在。
 func (s *Store) Item(token string) (Item, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,6 +105,7 @@ func (s *Store) Item(token string) (Item, bool) {
 	return cloneItem(item), true
 }
 
+// Tokens 返回所有已存储对象的 token 列表。
 func (s *Store) Tokens() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -104,6 +118,7 @@ func (s *Store) Tokens() []string {
 
 // Handle dispatches the S3-style request. Harnesses register it for
 // both "/{bucket}/{key}" (object ops) and "/{bucket}" (bucket ops).
+// Handle 分发 S3 风格的请求。harness 会为 "/{bucket}/{key}"（对象操作）和 "/{bucket}"（bucket 操作）两种路径注册它。
 func (s *Store) Handle(w http.ResponseWriter, r *http.Request) {
 	tenant, key, ok := resolveTenant(w, r)
 	if !ok {

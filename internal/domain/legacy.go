@@ -1,3 +1,4 @@
+// 本文件定义旧格式记录与 legacy 读取器，用于把历史聊天与设置读入当前格式。
 package domain
 
 import (
@@ -23,13 +24,24 @@ import (
 // device chats the old web client kept, old shares, and profiles and
 // projects old clients wrote. A field of the wrong type reads as absent, so
 // one odd field never hides a chat.
+// 一条 row 或设备记录会标明其所在格式。处于 readVersions 中某种格式的记录按原样读取。
+// 未标明格式的记录，是在格式被命名之前由 web 与 iOS 应用、旧 web 客户端，或客户端为
+// 新聊天写入的空白记录，由 legacy 读取器读入当前格式。任何其他格式的记录都会被拒绝。
+//
+// legacy 读取器可读取任意年代的 row：应用存入云端的聊天、旧 web 客户端保留的设备聊天、
+// 旧分享，以及旧客户端写入的 profile 与 project。类型错误的字段会按缺失处理，因此单个
+// 异常字段不会掩盖整个聊天。
 
 // errRecordUnsupported refuses a record in a format this harness does not
 // read, as a later harness writes, or that breaks the format it names.
+// errRecordUnsupported 拒绝本 harness 无法读取格式的记录（如更新版 harness 所写），
+// 或与其所声明格式不符的记录。
 var errRecordUnsupported = api.Err(409, "RECORD_UNSUPPORTED", "The record is in a format this harness cannot read")
 
 // currentFormat reports whether a record is in a format of readVersions,
 // as opposed to one written before formats were named.
+// currentFormat 报告记录是否处于 readVersions 中的某种格式，而非格式被命名之前写入的
+// 那种。
 func currentFormat(data []byte) (bool, error) {
 	var marker struct {
 		RecordVersion int `json:"recordVersion"`
@@ -45,6 +57,9 @@ func currentFormat(data []byte) (bool, error) {
 // another type. A member the format does not name is read past: the other
 // clients of the same rows write members of their own, and keep a record's
 // format marker when they write it back.
+// readCurrent 将当前格式的记录读入 v；若记录缺少该格式必需的成员，或某成员的值类型不符，
+// 则拒绝。该格式未命名的成员会被略过：同一批 row 的其他客户端会写入自己的成员，并在
+// 写回时保留记录的格式标记。
 func readCurrent(data []byte, v any, required ...string) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if decoder.Decode(v) != nil || decoder.More() || !holds(data, required) {
@@ -55,6 +70,7 @@ func readCurrent(data []byte, v any, required ...string) error {
 
 // holds reports whether a JSON object has every one of the members, each
 // set to a value other than null unless the format allows null for it.
+// holds 报告 JSON 对象是否包含全部成员，且每个成员都非 null（除非该格式允许其为 null）。
 func holds(data []byte, members []string) bool {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(data, &object) != nil {
@@ -72,6 +88,8 @@ func holds(data []byte, members []string) bool {
 // The members a record in the current format requires, as
 // protocol/openapi.yaml names them. The control plane files a chat's project apart from
 // it, and leaves projectId out of a fork outside a project.
+// 当前格式记录所要求的成员，名称与 protocol/openapi.yaml 一致。控制平面将聊天的 project
+// 与聊天分开归档，对于不在 project 中的 fork 则不写 projectId。
 var (
 	currentChat     = []string{"id", "title", "titleState", "model", "presetId", "pinned", "webSearchEnabled", "messages"}
 	currentMessage  = []string{"id", "role", "createdAt", "content"}
@@ -83,11 +101,15 @@ var (
 
 // currentCompaction are the members a compaction marker's record requires:
 // what its summary covers, and what wrote it.
+// currentCompaction 是 compaction 标记记录所要求的成员：其摘要所覆盖的内容，以及写它的是
+// 什么。
 var currentCompaction = []string{"messages", "startedAt", "endedAt", "model", "version"}
 
 // readCurrentThread reads a chat in the current format into v, whose
 // thread is t, refusing one whose messages or values that format does not
 // allow.
+// readCurrentThread 将当前格式的聊天读入 v（其 thread 为 t），并拒绝消息或值不符合该格式
+// 的记录。
 func readCurrentThread(data []byte, v any, t *Thread) error {
 	if err := readCurrent(data, v, currentChat...); err != nil {
 		return err
@@ -114,10 +136,13 @@ func readCurrentThread(data []byte, v any, t *Thread) error {
 
 // readLenient decodes data into v, leaving out each field of the wrong
 // type. Rows reach it as valid JSON objects.
+// readLenient 将 data 解码进 v，并忽略每个类型错误的字段。row 到达这里时都是合法的 JSON
+// 对象。
 func readLenient(data []byte, v any) { json.Unmarshal(data, v) }
 
 // LooseTime is a time old clients stored as RFC 3339 text or as Unix
 // milliseconds, read as RFC 3339.
+// LooseTime 是旧客户端以 RFC 3339 文本或 Unix 毫秒存储的时间，读取时统一为 RFC 3339。
 type LooseTime string
 
 func (t *LooseTime) UnmarshalJSON(b []byte) error {
@@ -127,6 +152,7 @@ func (t *LooseTime) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// ISOTime 将各种旧客户端写入的时间值统一为 RFC 3339 文本。
 func ISOTime(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -143,6 +169,7 @@ func ISOTime(value any) string {
 }
 
 // legacyThread is a chat row as any client stored it.
+// legacyThread 是任意客户端存储的聊天 row。
 type legacyThread struct {
 	Thread
 	CreatedAt        LooseTime       `json:"createdAt"`
@@ -153,6 +180,8 @@ type legacyThread struct {
 
 // legacyMessage is a message with the flat fields the apps stored before
 // replies had timelines and attachments had their own records.
+// legacyMessage 是带有扁平字段的消息，这些字段是应用在回复拥有 timeline、附件拥有独立
+// 记录之前存储的。
 type legacyMessage struct {
 	Message
 	Timestamp               LooseTime          `json:"timestamp"`
@@ -172,6 +201,7 @@ type legacyMessage struct {
 }
 
 // legacyFileName names one file of a message's flat fields.
+// legacyFileName 是消息扁平字段中的一个文件名。
 type legacyFileName struct {
 	Name string `json:"name"`
 }
@@ -179,6 +209,8 @@ type legacyFileName struct {
 // legacyAttachment is an attachment under the names the web and iOS apps
 // stored it with: its kind as type, and its size and thumbnail. In a backup,
 // an image and a page's image name the image the backup holds.
+// legacyAttachment 是 web 与 iOS 应用存储附件时所用的字段：其类型记为 type，并含大小与
+// 缩略图。在备份中，图像与页面图像会指向备份所持有的图像。
 type legacyAttachment struct {
 	Attachment
 	Type            string       `json:"type"`
@@ -195,9 +227,11 @@ type legacyPage struct {
 
 // BackupImages are the images a backup holds for one chat, by the id its
 // messages name each with.
+// BackupImages 是备份为单个聊天持有的图像，以消息为每张图指定的 id 为键。
 type BackupImages map[string]HeldImage
 
 // HeldImage is an image a backup holds, its bytes base64 encoded.
+// HeldImage 是备份持有的一张图像，其字节为 base64 编码。
 type HeldImage struct {
 	FileName, MimeType, Description string
 	Size                            int64
@@ -206,6 +240,8 @@ type HeldImage struct {
 
 // upgrade is the attachment in the current form. Old rows name only images
 // and documents, by type; a row the harness wrote names audio by kind too.
+// upgrade 返回当前形式的附件。旧 row 仅按 type 区分 image 与 document；harness 写入的
+// row 还会按 kind 记录 audio。
 func (a legacyAttachment) upgrade(images BackupImages) Attachment {
 	upgraded := a.Attachment
 	switch {
@@ -239,6 +275,8 @@ func (a legacyAttachment) upgrade(images BackupImages) Attachment {
 
 // legacyBlock is a timeline block, including the kinds the web client wrote
 // before every tool step was a tool call.
+// legacyBlock 是 timeline 块，包含 web 客户端在每个工具步骤都成为工具调用之前所写的
+// 各种类型。
 type legacyBlock struct {
 	Block
 	State   *legacySearch    `json:"state"`
@@ -270,6 +308,8 @@ type legacyFetch struct {
 // legacyFailed is whether an old client recorded a search or page read as
 // not completed: failed, blocked, or cut off while it ran. The iOS app
 // wrote a step without a status as completed.
+// legacyFailed 报告旧客户端是否把搜索或页面读取记录为未完成：失败、被阻止，或运行中被
+// 截断。iOS 应用把没有状态的步骤记为已完成。
 func legacyFailed(status string) bool { return status != "" && status != "completed" }
 
 type legacyCodeCall struct {
@@ -286,6 +326,7 @@ type legacyImage struct {
 }
 
 // ReadThread reads a chat row into the thread format.
+// ReadThread 将聊天 row 读入 thread 格式。
 func ReadThread(id string, data []byte) (Thread, error) {
 	switch current, err := currentFormat(data); {
 	case err != nil:
@@ -295,6 +336,7 @@ func ReadThread(id string, data []byte) (Thread, error) {
 	}
 	// Older clients marked a chat as kept in the cloud. The mark is theirs,
 	// and the harness leaves it out.
+	// 旧客户端会标记聊天保存在云端。该标记属于它们，harness 会将其略去。
 	var stored struct {
 		Thread
 		IsLocalOnly *bool `json:"isLocalOnly"`
@@ -308,12 +350,14 @@ func ReadThread(id string, data []byte) (Thread, error) {
 }
 
 // upgradeThread reads a chat, dated created when it holds no date.
+// upgradeThread 读取聊天，并在其没有日期时使用 created 作为日期。
 func upgradeThread(id string, data []byte, created string) Thread {
 	return readThreadWith(id, data, created, nil)
 }
 
 // ReadBackupThread reads a chat of a backup, whose images the backup holds
 // apart from it.
+// ReadBackupThread 读取备份中的聊天，其图像由备份另行持有。
 func ReadBackupThread(id string, data []byte, images BackupImages) Thread {
 	return readThreadWith(id, data, api.Timestamp(), images)
 }
@@ -346,6 +390,8 @@ func readThreadWith(id string, data []byte, created string, images BackupImages)
 
 // ReadThreadRow reads a stored chat. The control plane files a chat under its project
 // apart from the sealed row, and that filing is the chat's project.
+// ReadThreadRow 读取已存储的聊天。控制平面将聊天归档到其 project 下（与密封 row 分开），
+// 该归档即聊天的 project。
 func ReadThreadRow(row *StoredRow) (*ThreadRow, error) {
 	t, err := ReadThread(row.ID, row.Data)
 	if err != nil {
@@ -359,6 +405,8 @@ func ReadThreadRow(row *StoredRow) (*ThreadRow, error) {
 
 // ReadDeviceThread reads a thread a client keeps on its device. The fields
 // the harness owns are never taken from a client's copy.
+// ReadDeviceThread 读取客户端保存在设备上的 thread。harness 自有的字段绝不会取自客户端
+// 的副本。
 func ReadDeviceThread(id string, data []byte) (Thread, error) {
 	var t Thread
 	switch current, err := currentFormat(data); {
@@ -378,6 +426,8 @@ func ReadDeviceThread(id string, data []byte) (Thread, error) {
 
 // timeline is a reply's timeline, built from its old flat fields when it
 // has none and with every old block kind made a tool call.
+// timeline 是回复的 timeline：当回复没有 timeline 时，从其旧的扁平字段构建，并把每种旧
+// 块类型都做成工具调用。
 func (m *legacyMessage) timeline(message Message) []Block {
 	if message.Role != "assistant" {
 		if m.Timeline == nil {
@@ -422,6 +472,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 	blocks := []Block{}
 	// A call keeps when the step it came from ran. One that did not complete
 	// holds the result a failed call holds.
+	// 调用保留其来源步骤运行的时间。未完成的调用则保留失败调用所持有的结果。
 	call := func(startedAt, endedAt float64, id, name, args string, result any, status string) {
 		if legacyFailed(status) {
 			result = json.RawMessage(ToolError)
@@ -457,6 +508,7 @@ func (m *legacyMessage) timeline(message Message) []Block {
 	}
 	// A search keeps what the harness showed of it; one without shows what
 	// its arguments and result say.
+	// 搜索保留 harness 展示给它的内容；没有的则展示其参数与结果所示的内容。
 	for i := range blocks {
 		if b := &blocks[i]; b.Type == "tool_call" && b.Display == nil {
 			b.Display = SearchDisplay(b.Name, b.Arguments, b.Result)
@@ -467,6 +519,8 @@ func (m *legacyMessage) timeline(message Message) []Block {
 
 // arguments is a code call's arguments as JSON text. The apps stored them
 // as text or as an object, which is written out with sorted keys.
+// arguments 返回代码调用的参数（JSON 文本）。应用曾以文本或对象形式存储它们，对象会按
+// 排序后的键写出。
 func (c legacyCodeCall) arguments() string {
 	var text string
 	if json.Unmarshal(c.Arguments, &text) == nil && text != "" {
@@ -479,6 +533,8 @@ func (c legacyCodeCall) arguments() string {
 
 // attachments are a message's attachments, made from the document text and
 // image bytes the apps once kept on the message itself. Each has an id.
+// attachments 返回消息的附件，由应用过去保存在消息本身的文档文本与图像字节构建。每个附件
+// 都有 id。
 func (m *legacyMessage) attachments(messageID string, images BackupImages) []Attachment {
 	var attachments []Attachment
 	if m.Attachments != nil {
@@ -504,6 +560,11 @@ func (m *legacyMessage) attachments(messageID string, images BackupImages) []Att
 // descriptions apart from the documents' contents, they are the first
 // files, as the apps read them. Text no file has a section of is the only
 // document's, or else one unnamed document's.
+// flatAttachments 返回消息保存在扁平字段中的文件：先是文档，后是图像。documents 列出
+// 每个文件，每个文件的文本是消息合并文本中属于它的那一段：文档的内容，或图像的描述。
+// images 是描述所指的文件，按 imageData 的顺序排列；在 web 应用把描述与文档内容分开
+// 存储之前，它们是应用所读取的最前面的文件。没有文件拥有对应段落的文本，属于唯一的文档，
+// 否则属于某个未命名的文档。
 func (m *legacyMessage) flatAttachments(images BackupImages) []Attachment {
 	claimed := false
 	contents := func(name string) string {
@@ -557,6 +618,8 @@ func imageHeading(name string) string    { return "Image: " + name + "\nDescript
 
 // legacySection is the text after heading in combined, up to the next
 // section's start, as the apps cut it.
+// legacySection 返回 combined 中 heading 之后、到下一段开始之前的文本，与应用切割的
+// 一致。
 func legacySection(combined, heading, next string) string {
 	_, rest, found := strings.Cut(combined, heading)
 	if !found {
@@ -567,6 +630,7 @@ func legacySection(combined, heading, next string) string {
 }
 
 // ReadProfile reads a profile row.
+// ReadProfile 读取 profile row。
 func ReadProfile(data []byte) (StoredProfile, error) {
 	switch current, err := currentFormat(data); {
 	case err != nil:
@@ -587,6 +651,8 @@ func ReadProfile(data []byte) (StoredProfile, error) {
 	// The migrated prompt is dated by the profile, or by undatedProfile for a
 	// profile without a date, so each read of a profile not yet stored again
 	// makes the same one.
+	// 迁移后的 prompt 以 profile 的日期为准；无日期的 profile 则用 undatedProfile，这样
+	// 尚未重新存储的 profile 每次读取都会得到相同结果。
 	written, err := time.Parse(time.RFC3339Nano, profile.UpdatedAt)
 	if err != nil {
 		written = undatedProfile
@@ -596,19 +662,26 @@ func ReadProfile(data []byte) (StoredProfile, error) {
 }
 
 // undatedProfile is the date a profile without one is read as written.
+// undatedProfile 是无日期 profile 被当作写入日期使用的日期。
 var undatedProfile = time.Unix(0, 0).UTC()
 
 // MigratedPromptPresetID names the saved prompt an old custom default
 // prompt becomes, as the iOS app names it.
+// MigratedPromptPresetID 是旧的自定义默认 prompt 迁移后所得的已保存 prompt 名称，
+// 与 iOS 应用命名一致。
 const MigratedPromptPresetID = "user:migrated-custom-prompt"
 
 // systemTags are the tags old clients wrapped a custom prompt in.
+// systemTags 是旧客户端包裹自定义 prompt 所用的标签。
 var systemTags = regexp.MustCompile(`^<system>\s*\n?|\n?</system>\s*$`)
 
 // upgradeProfile reads settings old clients wrote as current ones: Auto's
 // earlier tiers are Auto, and an enabled custom default prompt becomes a
 // saved prompt that new chats start with, unless another default was
 // chosen. The old setting is turned off either way.
+// upgradeProfile 把旧客户端写入的设置读成当前设置：Auto 的早期档位一律视为 Auto；已启用
+// 的自定义默认 prompt 变成新聊天起始所用的已保存 prompt（除非已另选默认）。旧设置在两种
+// 情况下都会被关闭。
 func upgradeProfile(p *Profile, now time.Time) {
 	if p.SelectedModel != nil {
 		p.SelectedModel = new(normalizeModel(*p.SelectedModel))
@@ -636,6 +709,7 @@ func upgradeProfile(p *Profile, now time.Time) {
 }
 
 // ReadProject reads a project row.
+// ReadProject 读取 project row。
 func ReadProject(row *StoredRow) (Project, error) {
 	switch current, err := currentFormat(row.Data); {
 	case err != nil:
@@ -661,6 +735,7 @@ func ReadProject(row *StoredRow) (Project, error) {
 
 // ReadProjectDocument reads a project document row, which is filed under
 // the project's id.
+// ReadProjectDocument 读取 project 文档 row，该 row 归档在 project 的 id 之下。
 func ReadProjectDocument(row *StoredRow, projectID string) (ProjectDocument, error) {
 	var doc ProjectDocument
 	switch current, err := currentFormat(row.Data); {

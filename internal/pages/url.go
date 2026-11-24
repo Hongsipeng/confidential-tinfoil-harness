@@ -9,6 +9,8 @@ import (
 
 // NormalizeURL validates and canonicalizes a page's URL without resolving
 // its host, which context.dev resolves. Its errors name no part of the URL.
+// NormalizeURL 校验并规范化页面 URL，但不解析其主机（由 context.dev 解析）。其错误
+// 消息不包含 URL 的任何部分。
 func NormalizeURL(rawURL string) (string, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -26,6 +28,7 @@ func NormalizeURL(rawURL string) (string, error) {
 		return "", errors.New("only http and https URLs are allowed")
 	}
 	// A trailing dot names the same host.
+	// 末尾的点表示同一主机。
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	if host == "" {
 		return "", errors.New("the URL has no host")
@@ -50,6 +53,8 @@ func NormalizeURL(rawURL string) (string, error) {
 // endsInANumber reports whether host's last label is a number, decimal or
 // hexadecimal, as the URL standard reads one: such a host is an IPv4
 // address in a shorthand form, as 127.1 or 0x7f.0.0.1 is.
+// endsInANumber 报告 host 的最后一段标签是否为数字（十进制或十六进制），正如 URL
+// 标准所定义：这样的 host 是 IPv4 地址的简写形式，例如 127.1 或 0x7f.0.0.1。
 func endsInANumber(host string) bool {
 	label := host[strings.LastIndex(host, ".")+1:]
 	if hex, ok := strings.CutPrefix(strings.ToLower(label), "0x"); ok {

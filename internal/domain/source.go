@@ -1,3 +1,4 @@
+// 本文件定义线程来源（云端或设备）及其校验。
 package domain
 
 import (
@@ -10,6 +11,8 @@ import (
 // ThreadSource is where the chat an operation changes is kept: in the cloud,
 // named by id with the content key, or on the device that sends it with
 // the settings its prompt reads.
+// ThreadSource 指明操作所修改聊天的存放位置：在云端，以 id 加 content key 指明；或在
+// 发送它的设备上，随其 prompt 读取的设置一同发送。
 type ThreadSource struct {
 	Local   bool            `json:"local"`
 	Thread  json.RawMessage `json:"thread"`
@@ -18,6 +21,7 @@ type ThreadSource struct {
 
 // Validate refuses a source that names a chat in both places, or a device
 // chat whose copy cannot be read.
+// Validate 拒绝同时在两处指明聊天的来源，或副本无法读取的设备聊天。
 func (s *ThreadSource) Validate() error {
 	if !s.Local {
 		if s.Thread != nil || s.Profile != nil {
@@ -36,6 +40,7 @@ func (s *ThreadSource) Validate() error {
 
 // threadInput is what a client's copy of a thread must hold before the
 // legacy reader reads the rest.
+// threadInput 是客户端 thread 副本在 legacy 读取器读取其余部分之前必须持有的字段。
 type threadInput struct {
 	Title            *string        `json:"title"`
 	TitleState       *string        `json:"titleState"`
@@ -56,11 +61,14 @@ type messageInput struct {
 }
 
 // maxLocalMessages bounds the messages a client's thread may hold.
+// maxLocalMessages 是客户端 thread 可持有的消息数上限。
 const maxLocalMessages = 10000
 
 // MessageRoles are the roles a client's message may have.
+// MessageRoles 是客户端消息可拥有的角色。
 var MessageRoles = []string{"user", "assistant", CompactionRole}
 
+// ValidateLocalThread 校验客户端发送的本地 thread。
 func ValidateLocalThread(data []byte) error {
 	var thread threadInput
 	if err := api.DecodeRequest(data, &thread); err != nil {

@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	// 以下常量定义 envelope 各层 AAD 的 domain、格式版本与加密算法标识。
 	AADDomain        = "tinfoil-sync-envelope-v2"
 	DEKWrapAADDomain = "tinfoil-dek-wrap-v2"
 	BundleAADDomain  = "tinfoil-key-bundle-v2"
@@ -22,18 +23,25 @@ const (
 	// is uniform across scopes. Callers writing/reading profile
 	// blobs MUST pass this value — the AAD builder no longer
 	// substitutes it silently.
+	// ProfileSingletonID 是用户 profile 行的规范 AAD `id`。controlplane 仅以
+	// clerk_user_id 作为 profile blob 的 key（线上没有 `:id` 路径段），但 AAD
+	// 层要求显式的 id，以便 crypto 契约在各 scope 之间保持一致。写入/读取
+	// profile blob 的调用方必须传入该值——AAD 构建器不再静默替换它。
 	ProfileSingletonID = "profile"
 )
 
+// Scope 是 envelope 中数据所属范围的类型。
 type Scope string
 
 const (
+	// 以下常量定义各 scope 的取值。
 	ScopeChat            Scope = "chat"
 	ScopeProfile         Scope = "profile"
 	ScopeProject         Scope = "project"
 	ScopeProjectDocument Scope = "project_document"
 )
 
+// Valid 报告该 Scope 是否为已知的有效范围。
 func (s Scope) Valid() bool {
 	switch s {
 	case ScopeChat, ScopeProfile, ScopeProject, ScopeProjectDocument:
@@ -42,6 +50,7 @@ func (s Scope) Valid() bool {
 	return false
 }
 
+// AAD 是 envelope 各层 AAD 所绑定的标识信息（key id、scope、行 id 与用户 id）。
 type AAD struct {
 	KeyIDHex    string
 	Scope       Scope
@@ -50,6 +59,7 @@ type AAD struct {
 }
 
 var (
+	// ErrAADInvalid 表示 AAD 输入无效。
 	ErrAADInvalid = errors.New("invalid AAD inputs")
 )
 
@@ -59,6 +69,10 @@ var (
 // independent of which CEK is current; rewrapping only needs to reseal
 // the data key and can leave the (potentially large) payload untouched.
 // JSON: sorted keys, no insignificant whitespace, UTF-8.
+// CanonicalPayloadAAD 返回绑定 v2 envelope payload 层（在每条消息的 data key
+// 下密封的 gzip 后的明文）的 AAD。它有意省略 CEK key id，使 payload 密文独立
+// 于当前使用的 CEK；重包装时只需重新密封 data key，而可以让（可能很大的）
+// payload 保持不变。JSON：键已排序、无多余空白、UTF-8 编码。
 func CanonicalPayloadAAD(a AAD) ([]byte, error) {
 	if !a.Scope.Valid() {
 		return nil, ErrAADInvalid
@@ -90,6 +104,11 @@ func CanonicalPayloadAAD(a AAD) ([]byte, error) {
 // id, so a stored wrapped data key cannot be lifted onto another row, user,
 // scope, or key. The kid lives here, not in the payload AAD, so
 // rewrapping can change it without touching the payload ciphertext.
+// CanonicalDEKWrapAAD 返回绑定 v2 envelope key-wrap 层（在用户 CEK 下密封的
+// 每条消息 data key）的 AAD。它将包装与所属用户、行、scope 以及具体的 CEK
+// key id 绑定，因此存储的已包装 data key 无法被挪用到其他行、用户、scope 或
+// key 上。kid 放在这里而不是 payload AAD 中，因此重包装可以在不触及 payload
+// 密文的情况下更换它。
 func CanonicalDEKWrapAAD(a AAD) ([]byte, error) {
 	if !a.Scope.Valid() {
 		return nil, ErrAADInvalid
@@ -118,12 +137,14 @@ func CanonicalDEKWrapAAD(a AAD) ([]byte, error) {
 	return marshalCanonical(fields)
 }
 
+// BundleAAD 是 key bundle AAD 所绑定的标识信息（用户 id、key id 与 credential id）。
 type BundleAAD struct {
 	ClerkUserID  string
 	KeyIDHex     string
 	CredentialID string
 }
 
+// CanonicalBundleAAD 返回绑定 key bundle 的规范 AAD 字节。
 func CanonicalBundleAAD(a BundleAAD) ([]byte, error) {
 	if a.ClerkUserID == "" || a.CredentialID == "" {
 		return nil, ErrAADInvalid
@@ -181,11 +202,15 @@ func writeCanonicalValue(buf *bytes.Buffer, v any) error {
 	case float64:
 		// JSON numbers from generic decode arrive as float64. Emit without
 		// trailing zeros; reject non-finite values.
+		// 通用解码得到的 JSON 数字以 float64 形式出现。输出时不带尾随零，
+		// 并拒绝非有限值。
 		if !isFinite(x) {
 			return errors.New("non-finite number in canonical JSON")
 		}
 		// Integer-valued floats serialize without a decimal point so they
 		// match how clients typically encode them.
+		// 整数值的 float 序列化时不带小数点，以便与 client 通常的编码方式
+		// 保持一致。
 		if x == float64(int64(x)) {
 			buf.WriteString(strconv.FormatInt(int64(x), 10))
 		} else {

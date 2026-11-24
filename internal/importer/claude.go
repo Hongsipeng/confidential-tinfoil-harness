@@ -9,6 +9,8 @@ import (
 // Claude's conversations and Tinfoil's export share one shape. Tinfoil's
 // attachments name their kind and the archive entry of an image's bytes;
 // Claude's name a document's extracted text, and its images are files.
+// Claude 的对话与 Tinfoil 的 export 共享同一结构。Tinfoil 的 attachment 标明其 kind 以及 image 字节
+// 所在的归档条目；Claude 的 attachment 标明 document 的提取文本，其 image 则是文件。
 
 type claudeConversation struct {
 	UUID         string          `json:"uuid"`
@@ -33,10 +35,12 @@ type claudeMessage struct {
 
 type claudeAttachment struct {
 	// Claude's document
+	// Claude 的 document
 	FileName         string `json:"file_name"`
 	FileSize         int64  `json:"file_size"`
 	ExtractedContent string `json:"extracted_content"`
 	// Tinfoil's attachment
+	// Tinfoil 的 attachment
 	ID          string `json:"id"`
 	Type        string `json:"type"`
 	Name        string `json:"fileName"`
@@ -53,6 +57,7 @@ type claudeFile struct {
 
 // ReadClaude reads a Claude or Tinfoil conversation, or nil when it has no
 // message to show. Images resolve through index.
+// ReadClaude 读取一条 Claude 或 Tinfoil 对话，无可展示消息时返回 nil。image 通过 index 解析。
 func ReadClaude(record json.RawMessage, index *Index) (*Conversation, error) {
 	var conv claudeConversation
 	if err := json.Unmarshal(record, &conv); err != nil {
@@ -119,6 +124,7 @@ func claudeAttachments(msg *claudeMessage, index *Index) []Attachment {
 		}
 		seen[key] = true
 		// A file's id names it alone; its name may be one any file has.
+		// 文件的 id 唯一标识它；而文件名可能是多个文件共用的。
 		name, ok := index.ByIDPrefix(f.FileUUID)
 		if !ok {
 			name, ok = index.Exact(f.FileName)
@@ -150,6 +156,7 @@ type claudeProject struct {
 
 // ReadClaudeProject reads a Claude project, or nil for the empty starter
 // project Claude gives every account.
+// ReadClaudeProject 读取一个 Claude project，对于 Claude 给每个账户的空初始 project 返回 nil。
 func ReadClaudeProject(record json.RawMessage) (*Project, error) {
 	var p claudeProject
 	if err := json.Unmarshal(record, &p); err != nil {

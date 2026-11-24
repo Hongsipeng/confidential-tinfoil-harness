@@ -18,6 +18,7 @@ const (
 	// MaxBatchSize caps how many inputs one Embed call sends. The
 	// inference service accepts larger batches, but bounding it here
 	// keeps request bodies and worst-case latency predictable.
+	// MaxBatchSize 限制单次 Embed 调用发送的输入数量。推理服务接受更大的批次，但在此处限制可让请求体和最坏情况延迟保持可预测。
 	MaxBatchSize = 64
 )
 
@@ -27,11 +28,13 @@ type embeddingService interface {
 
 // Embedder calls the embeddings endpoint through the Tinfoil SDK's
 // attested, enclave-bound transport.
+// Embedder 通过 Tinfoil SDK 经 attest 且绑定 enclave 的传输层调用 embeddings 端点。
 type Embedder struct {
 	model      string
 	embeddings embeddingService
 }
 
+// NewEmbedder 使用 apiKey 和 model 构造 Embedder。
 func NewEmbedder(apiKey, model string) (*Embedder, error) {
 	client := &Embedder{model: model}
 	if apiKey == "" || model == "" {
@@ -55,6 +58,7 @@ func NewEmbedder(apiKey, model string) (*Embedder, error) {
 // Configured reports whether the client has everything it needs to
 // issue embedding requests. Callers use this to gate search features
 // with a clean 503 instead of a confusing upstream error.
+// Configured 报告客户端是否具备发起 embedding 请求所需的全部条件。调用者用它来把关搜索功能，以干净的 503 代替令人困惑的上游错误。
 func (c *Embedder) Configured() bool {
 	return c != nil && c.embeddings != nil && c.model != ""
 }
@@ -62,6 +66,7 @@ func (c *Embedder) Configured() bool {
 // Model returns the embedding model identifier. The search index
 // records it so a model change invalidates stored vectors instead of
 // silently mixing incomparable embedding spaces.
+// Model 返回 embedding 模型标识符。搜索索引会记录它，以便模型变更时使已存储的向量失效，而不是静默混用不可比较的 embedding 空间。
 func (c *Embedder) Model() string {
 	if c == nil {
 		return ""
@@ -70,6 +75,7 @@ func (c *Embedder) Model() string {
 }
 
 // Embed returns one embedding vector per input, in input order.
+// Embed 按输入顺序为每个输入返回一个 embedding 向量。
 func (c *Embedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
 	if !c.Configured() {
 		return nil, errors.New("inference: embedder not configured")

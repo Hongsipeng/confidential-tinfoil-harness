@@ -3,62 +3,79 @@ package summarize
 import "time"
 
 // Role is the model a task runs on, which configuration names.
+// Role 是 task 所运行的模型，由配置命名。
 type Role string
 
 const (
 	// Fast is a quick model for short text, SUMMARY_MODEL.
+	// Fast 是用于短文本的快速模型，即 SUMMARY_MODEL。
 	Fast Role = "fast"
 	// Long is a model whose window holds a long conversation,
 	// LONG_SUMMARY_MODEL.
+	// Long 是窗口可容纳长对话的模型，即 LONG_SUMMARY_MODEL。
 	Long Role = "long"
 )
 
 // Task is one use the harness has of summaries.
+// Task 是 harness 对摘要的一种用途。
 type Task struct {
 	// Name and Version say which instructions wrote a summary.
+	// Name 和 Version 表明摘要由哪一版指令写出。
 	Name    string
 	Version int
 	Role    Role
 	// Instructions open the system prompt, which Sections and the word
 	// range complete.
+	// Instructions 是 system prompt 的开头，由 Sections 和字数范围补全。
 	Instructions string
 	// Sections are the level-two headings a summary holds, in this order
 	// and as written here.
+	// Sections 是摘要所含的二级标题，按此顺序且照此书写。
 	Sections []Section
 	// MinWords and MaxWords, when set, are the length the prompt asks for.
+	// MinWords 和 MaxWords（若设置）是 prompt 所要求的字数范围。
 	MinWords, MaxWords int
 	// MaxLineChars, when set, is what the check holds a summary to: one
 	// line of at most this many characters, without a code block.
+	// MaxLineChars（若设置）是 check 对摘要的要求：一行最多这么多字符，且不含代码块。
 	MaxLineChars int
 	// Frame is the tag the documents are read in. A task without one reads
 	// its document's text as it is.
+	// Frame 是文档被读取时所在的标签。没有 Frame 的 task 会原样读取其文档文本。
 	Frame string
 	// Closing follows the documents, restating the task after a long input.
+	// Closing 跟在文档之后，在长输入之后重申 task。
 	Closing string
 	// MaxTokens bounds each call's output, reasoning included. A summary
 	// that reaches it is cut off, and fails.
+	// MaxTokens 限制每次调用的输出（包括推理）。达到该上限的摘要会被截断，并判定失败。
 	MaxTokens   int64
 	Temperature *float64
 	// Timeout bounds each call, and Attempts is how many calls a summary
 	// takes when one fails for a while or writes a summary that fails its
 	// check.
+	// Timeout 限制每次调用，Attempts 是当某次调用持续失败或写出的摘要未通过 check 时，一份摘要所进行的调用次数。
 	Timeout  time.Duration
 	Attempts int
 	// Fold reads an input too large for one call in parts, folding each
 	// into the summary of the parts before it. Without it, such an input
 	// fails.
+	// Fold 会把一次调用放不下的输入分部分读取，每部分都折叠进之前各部分的摘要中。没有它时，此类输入会失败。
 	Fold bool
 	// CallerPays bills each call to the caller whose run asks for the
 	// summary, rather than the harness.
+	// CallerPays 把每次调用计费到发起该摘要的 run 的调用方，而非 harness。
 	CallerPays bool
 }
 
 // Section is a heading a summary holds, and what goes under it.
+// Section 是摘要所含的一个标题，以及其下的内容说明。
 type Section struct {
 	Heading, Description string
 }
 
 // Title names a chat from its first message.
+// Title 根据 chat 的第一条消息为其命名。
 var Title = &Task{
 	Name: "title", Version: 1, Role: Fast,
 	Instructions: "Generate a concise, descriptive title for the following text. ONLY output plain text - never output markdown or code.",
@@ -67,6 +84,7 @@ var Title = &Task{
 }
 
 // Thoughts labels what a reply is reasoning about as it thinks.
+// Thoughts 为回复思考时正在推理的内容打标签。
 var Thoughts = &Task{
 	Name: "thoughts", Version: 1, Role: Fast,
 	Instructions: `You produce a brief status label describing what an AI assistant is currently reasoning about. The label is shown to a user who is waiting for the AI to finish thinking.
@@ -95,6 +113,7 @@ Good examples:
 // messages before it, which the model reads in their place. Its documents
 // are messages, from the user or the assistant, and the files attached to
 // them.
+// Compaction 写出 compaction 标记所持有的、其之前 chat 消息的摘要，模型以该摘要替代这些消息来读取。它的文档是来自用户或助手的消息，以及它们所附带的文件。
 var Compaction = &Task{
 	Name: "compaction", Version: 2, Role: Long,
 	Instructions: `You are compacting a long conversation between a user and an AI assistant so it fits in the assistant's context window. Your summary replaces every message in the transcript. Afterwards the assistant sees only its system prompt, which holds the user's saved preferences and any project instructions and documents, then your summary, then the conversation's most recent messages, which come after the transcript and which it reads as they were. Nothing else from the transcript survives: no earlier message, attached file, image or web page. Anything you leave out is forgotten, and the assistant will not know to ask for it.
@@ -120,6 +139,7 @@ Rules:
 	Frame:   "transcript",
 	Closing: "Write the summary now, following the instructions.",
 	// The output holds the model's reasoning as well as the summary.
+	// 输出既包含摘要，也包含模型的推理。
 	MaxTokens: 16384, Temperature: new(0.2), Timeout: 5 * time.Minute, Attempts: 3,
 	Fold: true, CallerPays: true,
 }
@@ -128,6 +148,7 @@ Rules:
 // the model reads in place of its searches and pages once they outgrow its
 // window. Its documents are the model's notes between its tool calls, and
 // what each search and page read returned.
+// ResearchNotes 写出 research 对其所读内容所做的笔记，当搜索和页面超出模型窗口时，模型以这些笔记替代它们来读取。它的文档是模型在工具调用之间写下的笔记，以及每次搜索和页面读取的返回内容。
 var ResearchNotes = &Task{
 	Name: "research_notes", Version: 1, Role: Long,
 	Instructions: `You keep the notes of an AI assistant that is researching a question on the web for a user. The transcript holds what the assistant wrote as it worked and what each of its web searches and page reads returned. The transcript is about to be removed from the assistant's context: afterwards it sees only the user's request and your notes, goes on researching, and finally writes a report with citations from your notes alone. Anything you leave out is lost, and a source you do not name cannot be cited.
@@ -151,6 +172,7 @@ Rules:
 	Frame:   "research",
 	Closing: "Write the notes now, following the instructions.",
 	// The output holds the model's reasoning as well as the notes.
+	// 输出既包含笔记，也包含模型的推理。
 	MaxTokens: 16384, Temperature: new(0.2), Timeout: 5 * time.Minute, Attempts: 3,
 	Fold: true, CallerPays: true,
 }

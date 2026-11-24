@@ -55,6 +55,7 @@ func (eng *Engine) retryWidget(ctx context.Context, r *Run, req *Request, m *inf
 	r.out.callArgs(id, content)
 	r.out.callEnd(id)
 	// The widget's result is the one a call with these arguments returns.
+	// widget 的结果就是一次携带这些参数的调用所返回的结果。
 	result, err := eng.widgetResult(ctx, ToolCall{ID: id, Name: declaration.Name, Args: content})
 	if err != nil {
 		result = api.Object{"error": api.AsError(err).Message}
@@ -65,3 +66,4 @@ func (eng *Engine) retryWidget(ctx context.Context, r *Run, req *Request, m *inf
 }
 
 // replacedWidget is what a retry gives its widget call.
+// replacedWidget 是 retry 赋予其 widget 调用的内容。

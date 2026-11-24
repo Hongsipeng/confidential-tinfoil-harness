@@ -13,6 +13,7 @@ import (
 )
 
 // RunRequest names a run, or a turn queued behind one, of a chat.
+// RunRequest 指定聊天的一个 run，或排在其后面的一个 turn。
 type RunRequest struct {
 	api.KeyRequest
 	ThreadID string `json:"threadId"`
@@ -21,12 +22,14 @@ type RunRequest struct {
 }
 
 // ThreadImportRequest stores a device chat in the cloud under its id.
+// ThreadImportRequest 将设备的聊天以其 id 存储到云端。
 type ThreadImportRequest struct {
 	api.KeyRequest
 	ThreadID string          `json:"threadId"`
 	Thread   json.RawMessage `json:"thread"`
 }
 
+// Validate 校验线程导入请求的合法性。
 func (in *ThreadImportRequest) Validate() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
@@ -38,6 +41,7 @@ func (in *ThreadImportRequest) Validate() error {
 }
 
 // TurnRequest is one user action on a chat, which its run carries out.
+// TurnRequest 是对聊天的一次用户操作，由该聊天的 run 来执行。
 type TurnRequest struct {
 	api.KeyRequest
 	ClientRequestID string               `json:"clientRequestId"`
@@ -58,6 +62,8 @@ type TurnRequest struct {
 	Browser         *BrowserAccess       `json:"browser,omitempty"`
 	// CompactLatest has a compaction on request summarize the chat's latest
 	// exchange too, for a client that shows a marker at the end of a chat.
+	// CompactLatest 让按请求进行的 compaction 也汇总聊天最新的 exchange，
+	// 供在聊天末尾显示标记的客户端使用。
 	CompactLatest bool        `json:"compactLatest,omitempty"`
 	Options       turnOptions `json:"options"`
 }
@@ -74,9 +80,12 @@ type turnOptions struct {
 	GenUI            *bool  `json:"genUI,omitempty"`
 	// Research has the turn research its question on the web at length
 	// before it answers with a report.
+	// Research 让该 turn 在给出报告式回答之前，先在网页上对其问题进行深入研究。
 	Research bool `json:"research,omitempty"`
 	// CacheSecret scopes the prompt cache to the client that holds it, as
 	// the Tinfoil SDKs scope theirs: 256 random bits, hex encoded.
+	// CacheSecret 将 prompt 缓存限定到持有它的客户端，正如 Tinfoil SDK 所做的那样：
+	// 256 位随机数，十六进制编码。
 	CacheSecret string `json:"cacheSecret,omitempty"`
 }
 
@@ -86,14 +95,18 @@ var (
 	turnKinds = []string{"send", "edit", "regenerate", "continue", "retryToolCall", "ask", "retry", "compact"}
 	// researchKinds are the turns that answer a question anew, which a
 	// research may answer.
+	// researchKinds 是重新回答一个问题的那些 turn，research 可以回答这些 turn。
 	researchKinds = []string{"send", "edit", "regenerate", "retry"}
 	// compactingKinds are the turns that may compact a chat on request: a
 	// compaction, and a retry, which compacts again after one failed.
+	// compactingKinds 是可按请求对聊天做 compaction 的那些 turn：一次 compaction，
+	// 以及一次 retry（在一次 compaction 失败后会再次压缩）。
 	compactingKinds = []string{"compact", "retry"}
 )
 
 // Validate refuses a turn its run could not carry out. Who may send it is
 // checked with the caller.
+// Validate 拒绝那些其 run 无法执行的 turn。谁可以发送它，则与调用方一起校验。
 func (in *TurnRequest) Validate() error {
 	if _, err := uuid.Parse(in.ClientRequestID); err != nil {
 		return api.Err(400, "BAD_REQUEST", "clientRequestId must be a UUID")
@@ -103,6 +116,7 @@ func (in *TurnRequest) Validate() error {
 		return api.Err(400, "BAD_REQUEST", "Unknown turn kind")
 	}
 	// An ask is never stored, so it may still say so.
+	// ask 从不被存储，因此它仍可声明这一点。
 	if in.Ephemeral && in.Kind != "ask" {
 		return api.Err(400, "BAD_REQUEST", "Temporary chats are kept on the device")
 	}
@@ -127,6 +141,7 @@ func (in *TurnRequest) Validate() error {
 }
 
 // validateContent refuses a turn whose content cannot make its message.
+// validateContent 拒绝那些其内容无法构成其消息的 turn。
 func (in *TurnRequest) validateContent() error {
 	if err := api.RequireID("threadId", in.ThreadID); err != nil {
 		return err
@@ -154,6 +169,7 @@ func (in *TurnRequest) validateContent() error {
 		}
 	} else if in.Local && in.Kind == "ask" {
 		// An ask about a device chat reads the conversation its client sends.
+		// 关于设备聊天的 ask 会读取其客户端发送的会话内容。
 		return api.Err(400, "BAD_REQUEST", "A local thread requires its transcript")
 	}
 	pixels := int64(0)
@@ -171,6 +187,7 @@ func (in *TurnRequest) validateContent() error {
 
 // digest identifies a turn's content, so a retry of the request is told from
 // another request under the same id.
+// digest 标识一个 turn 的内容，这样同一次请求的重试就能与同一 id 下的另一次请求区分开。
 func (in *TurnRequest) digest() string {
 	copy := *in
 	copy.Key = nil

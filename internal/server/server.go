@@ -1,4 +1,5 @@
 // Package server wires the harness and serves its HTTP API.
+// Package server 负责装配 harness 并提供其 HTTP API。
 package server
 
 import (
@@ -42,9 +43,11 @@ type harness struct {
 
 // listenAddr is the shim's upstream port in tinfoil-config.yml, which also
 // sets every host this harness reaches.
+// listenAddr 是 tinfoil-config.yml 中 shim 的上游端口；该文件也配置了本 harness 访问的所有主机。
 const listenAddr = ":8081"
 
 // Run starts the chat server and waits for shutdown.
+// Run 启动聊天服务器并等待其关闭。
 func Run() {
 	usageSecret := os.Getenv("USAGE_CONTEXT_SECRET")
 	if usageSecret == "" {

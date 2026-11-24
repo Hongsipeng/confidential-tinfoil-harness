@@ -17,6 +17,7 @@ var startupAttestation = attestationRunner{timeout: attestationTimeout}
 // The SDK verifies a direct enclave at construction without a context, and may
 // retry a 30-second attestation fetch once. Bound how long startup waits and
 // discard late results; startup verifies its few enclaves one at a time.
+// SDK 在构造时不带上下文就直接验证 enclave，且可能对 30 秒的 attestation 拉取重试一次。这里限制了启动时等待的时长并丢弃迟到的结果；启动会逐个验证其少数几个 enclave。
 func (r *attestationRunner) run(ctx context.Context, verify func() (*http.Client, error)) (*http.Client, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()

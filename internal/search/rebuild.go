@@ -1,3 +1,4 @@
+// 本文件实现后台 rebuild：逐页读取调用方全部已存储聊天并重建索引，支持断点续传与 embedding 修复。
 package search
 
 import (
@@ -23,23 +24,32 @@ import (
 // seal the index on their behalf; they live only in this process and
 // only for the budget. A clean page checkpoints its cursor inside the
 // sealed index, so a later rebuild picks up where this one stopped.
+// rebuild 在后台逐页读取调用方的每个已存储聊天并重建索引：一个账号可能持有成千上万个聊天，
+// 每个都要嵌入。它在运行期间像 reseal 一样保留调用方的密钥，因为它必须代表调用方打开聊天
+// 并封存索引；这些密钥仅存在于本进程、且仅在预算期间内。一个干净的页面会把其游标 checkpoint
+// 到封存的索引内，使后续 rebuild 能从本次停止处继续。
 
 const (
 	// RebuildBudget bounds one rebuild, and so how long it keeps the
 	// caller's keys; a larger corpus resumes from the checkpoint.
+	// RebuildBudget 限制单次 rebuild，从而限制其保留调用方密钥的时长；更大的语料库会从 checkpoint 继续。
 	RebuildBudget = 20 * time.Minute
 	// RebuildRetention is how long an ended rebuild still answers for the
 	// caller, so a client polling for its end sees it rather than
 	// starting another.
+	// RebuildRetention 是已结束的 rebuild 仍为调用方应答的时长，这样轮询其结束的客户端能看到它，
+	// 而不是再启动一次。
 	RebuildRetention = 5 * time.Minute
 	// rebuildPage is how many chats one page reads and embeds, within
 	// the embedder's batch.
+	// rebuildPage 是单页读取并嵌入的聊天数量，在 embedder 的批处理范围之内。
 	rebuildPage = 16
 )
 
 var (
 	// errRebuildIncomplete ends a rebuild that drained the chats but left
 	// some out, so the caller asks again.
+	// errRebuildIncomplete 结束一次虽已读完聊天但仍有遗漏的 rebuild，于是调用方会再次请求。
 	errRebuildIncomplete = errors.New("search: the rebuild left chats out")
 	errRebuildFailed     = api.Err(502, "SEARCH_INDEX_FAILED", "The search index could not be rebuilt")
 )
@@ -47,6 +57,8 @@ var (
 // RebuildReport is where a rebuild stands: the chats indexed and the
 // chats left out so far, how many the index holds, and whether it
 // stopped short of the whole corpus.
+// RebuildReport 描述 rebuild 的进展：到目前为止已索引的聊天与遗漏的聊天，索引当前持有的聊天
+// 总数，以及是否在覆盖整个语料库之前提前停止。
 type RebuildReport struct {
 	Indexed      int
 	Failed       int
@@ -57,12 +69,15 @@ type RebuildReport struct {
 // rebuildFingerprint is what a rebuild is for: the key it reads and
 // seals under, and whether it only repairs embeddings. A request for
 // another cannot join a job whose index it could not read.
+// rebuildFingerprint 描述一次 rebuild 的目的：它读取与封存所用的密钥，以及是否只修复 embedding。
+// 请求不同内容的调用方不能加入一个其索引无法读取的 job。
 type rebuildFingerprint struct {
 	kid           string
 	embeddingOnly bool
 }
 
 // startedRebuild is a caller's last rebuild and what it was for.
+// startedRebuild 是调用方最后一次 rebuild 及其目的。
 type startedRebuild struct {
 	job         *jobs.Job[RebuildReport]
 	fingerprint rebuildFingerprint
@@ -73,6 +88,9 @@ type startedRebuild struct {
 // indexing is still under way when the call returns. A rebuild that
 // ended partial leaves indexing under way, since the next one resumes
 // it; one that failed is reported once, and the next call starts over.
+// Rebuild 在后台从调用方已存储的聊天重建其索引，存在 checkpoint 时则续传，并报告调用返回时
+// 索引工作是否仍在进行。以 partial 结束的 rebuild 会让索引工作保持进行状态，因为下一次会续传它；
+// 失败的一次只报告一次，下一次调用则从头开始。
 func (s *Service) Rebuild(ctx context.Context, p *auth.Principal, key auth.ContentKey) (indexing bool, err error) {
 	defer clear(key[:])
 	if !s.configured() {
@@ -98,6 +116,7 @@ func (s *Service) Rebuild(ctx context.Context, p *auth.Principal, key auth.Conte
 
 // startEmbeddingRepair embeds, in the background, the entries indexed by
 // keyword alone while the embedding service was down.
+// startEmbeddingRepair 在后台为 embedding 服务宕机期间仅凭关键词建立索引的条目补做嵌入。
 func (s *Service) startEmbeddingRepair(ctx context.Context, c caller, key auth.ContentKey) {
 	_, _ = s.startRebuild(ctx, c, key, true)
 }
@@ -107,6 +126,9 @@ func (s *Service) startEmbeddingRepair(ctx context.Context, c caller, key auth.C
 // joins rather than interrupts broader work; the one ended cleanly when
 // the index needs no repair; otherwise a new one, after the running one
 // is stopped and has wound down, so two never write the same index.
+// startRebuild 返回调用方的 rebuild：当针对同一密钥、或仅需修复 embedding 时可加入正在运行的
+// job（加入而非打断更广泛的工作）；当索引无需修复时返回已干净结束的那次；否则在正在运行的
+// 那次被停止并收尾后，启动一次新的，从而保证不会有两次同时写同一个索引。
 func (s *Service) startRebuild(ctx context.Context, c caller, key auth.ContentKey, embeddingOnly bool) (*jobs.Job[RebuildReport], error) {
 	owner := c.owner()
 	fingerprint := rebuildFingerprint{kid: c.kid, embeddingOnly: embeddingOnly}
@@ -121,6 +143,7 @@ func (s *Service) startRebuild(ctx context.Context, c caller, key auth.ContentKe
 				return prev.job, nil
 			case status.State == jobs.Failed && !embeddingOnly:
 				// Reported to this caller; the next request starts over.
+				// 已向本调用方报告；下一次请求将从头开始。
 				s.forgetLocked(owner)
 				s.mu.Unlock()
 				return prev.job, nil
@@ -165,6 +188,7 @@ func (s *Service) startRebuild(ctx context.Context, c caller, key auth.ContentKe
 
 // forgetEnded drops the record of a rebuild once it has ended and its
 // retention has passed, so the records held are those of recent rebuilds.
+// forgetEnded 在一次 rebuild 结束且超过保留期后丢弃其记录，使保留的记录仅是近期的 rebuild。
 func (s *Service) forgetEnded(owner string, job *jobs.Job[RebuildReport]) {
 	<-job.Done()
 	time.AfterFunc(RebuildRetention, func() {
@@ -178,6 +202,7 @@ func (s *Service) forgetEnded(owner string, job *jobs.Job[RebuildReport]) {
 
 // lastRebuild is the caller's last rebuild, running or ended within the
 // retention. Callers hold s.mu.
+// lastRebuild 返回调用方最后一次 rebuild，无论是运行中还是保留期内已结束的。调用方持有 s.mu。
 func (s *Service) lastRebuild(owner string) (startedRebuild, bool) {
 	prev, ok := s.started[owner]
 	if !ok {
@@ -191,6 +216,7 @@ func (s *Service) lastRebuild(owner string) (startedRebuild, bool) {
 }
 
 // forgetRebuild ends and forgets the caller's rebuild, running or ended.
+// forgetRebuild 结束并遗忘调用方的 rebuild，无论其正在运行还是已结束。
 func (s *Service) forgetRebuild(owner string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,6 +232,8 @@ func (s *Service) forgetLocked(owner string) {
 // checkpoint when one exists, and reports after each page. The budget or
 // a cancellation mid-page leaves that page to the next rebuild; the pages
 // done survive.
+// rebuild 逐页读取调用方的聊天，存在干净 checkpoint 时续传，并在每页完成后报告。预算用尽或
+// 页中途被取消会让该页留给下一次 rebuild；已完成的页会保留下来。
 func (s *Service) rebuild(ctx context.Context, c caller, report func(RebuildReport)) (RebuildReport, error) {
 	var out RebuildReport
 	publication, _, err := s.publication(ctx, c)
@@ -245,6 +273,8 @@ func (s *Service) rebuild(ctx context.Context, c caller, report func(RebuildRepo
 			// A budget that ran out mid-page surfaces as a context error
 			// wrapped in the failure of some request: that is partial,
 			// not failed, so the client asks again rather than alarm.
+			// 页中途预算耗尽会表现为包裹在某请求失败中的 context 错误：这属于 partial
+			// 而非 failed，因此客户端会再次请求而不是告警。
 			if ctx.Err() != nil {
 				return stopped()
 			}
@@ -256,6 +286,8 @@ func (s *Service) rebuild(ctx context.Context, c caller, report func(RebuildRepo
 		if page.embeddingFailed {
 			// One outage detected, the rest of the corpus is indexed by
 			// keyword alone, for a later query to repair.
+			// 一旦检测到一次故障，语料库其余部分就仅按关键词索引，
+			// 留待后续查询修复。
 			embed = false
 		}
 		if page.failed > 0 {
@@ -279,6 +311,8 @@ func (s *Service) rebuild(ctx context.Context, c caller, report func(RebuildRepo
 // loadCheckpoint is the checkpoint a rebuild resumes: the one the stored
 // index holds, when the index is this caller's, incomplete, and
 // published at the checkpoint's own target.
+// loadCheckpoint 返回 rebuild 续传所用的 checkpoint：即已存储索引所持有的那个，前提是该索引
+// 属于本调用方、标记为 incomplete、且发布于该 checkpoint 自身的目标。
 func (s *Service) loadCheckpoint(ctx context.Context, c caller, publication *controlplane.SearchIndexState) (*searchindex.ReindexProgress, bool, error) {
 	if publication.ObjectKey == "" || !publication.PublicationIncomplete || s.readableObject(publication, c) == "" {
 		return nil, false, nil
@@ -299,6 +333,8 @@ func (s *Service) loadCheckpoint(ctx context.Context, c caller, publication *con
 // pageResult is one page of a rebuild: what it indexed and left out,
 // the cursor the next page reads from, and the checkpoint it resumes
 // when the stored index holds another rebuild's.
+// pageResult 是 rebuild 的一页：它索引与遗漏的内容、下一页读取的游标，以及当已存储索引持有
+// 另一次 rebuild 的 checkpoint 时它续传所用的 checkpoint。
 type pageResult struct {
 	indexed, failed int
 	embeddingFailed bool
@@ -310,6 +346,7 @@ type pageResult struct {
 }
 
 // pendingChat is a chat read for a page, with its text in chunks.
+// pendingChat 是为某一页读取的聊天，其文本已切分为分块。
 type pendingChat struct {
 	id, etag, kid string
 	chunks        []string
@@ -320,6 +357,9 @@ type pendingChat struct {
 // which drops chats deleted since, while entries written since the
 // rebuild began stay. Every clean page but the last checkpoints its
 // cursor in the index, so a later rebuild resumes it.
+// rebuildPage 从调用方已存储的聊天重建一页索引。空游标表示从头开始：startedAt 之前的条目
+// 被移除，从而丢掉此后已删除的聊天，而 rebuild 开始以来写入的条目则保留。除最后一页外，
+// 每个干净页面都会把游标 checkpoint 到索引中，以便后续 rebuild 续传。
 func (s *Service) rebuildPage(ctx context.Context, c caller, cursor string, startedAt time.Time, target int64, priorFailure, embed bool) (*pageResult, error) {
 	owner := c.owner()
 	listed, err := s.Rows.List(ctx, c.p, c.key, "chat", cursor, "", rebuildPage)
@@ -463,6 +503,8 @@ func (s *Service) rebuildPage(ctx context.Context, c caller, cursor string, star
 // A pending entry is repaired with vectors for the chat at the revision
 // the entry was built from; one whose chat another key seals is marked
 // with that key, so only a query under it tries again.
+// 待修复条目会用在条目所依据的修订处为聊天生成的向量来修复；若其聊天由另一把密钥封存，
+// 则用该密钥标记，使得只有在该密钥下的查询才会重试。
 type embeddingRepair struct {
 	id, etag string
 	vectors  []searchindex.Vector
@@ -475,6 +517,8 @@ type embeddingBlocked struct {
 // repairEmbeddings embeds the entries this key can repair, a page at a
 // time, and reports after each. The index must be this caller's and
 // readable; anything less is left to a rebuild.
+// repairEmbeddings 逐页嵌入本密钥可修复的条目，并在每页后报告。索引必须属于本调用方且可读；
+// 达不到该条件则留给 rebuild。
 func (s *Service) repairEmbeddings(ctx context.Context, c caller, report func(RebuildReport)) (RebuildReport, error) {
 	var out RebuildReport
 	owner := c.owner()
@@ -537,6 +581,7 @@ func (s *Service) repairEmbeddings(ctx context.Context, c caller, report func(Re
 			if !ok {
 				if unreadable[id] == nil {
 					// The chat was deleted since it was indexed.
+					// 该聊天自被索引以来已被删除。
 					gone = append(gone, id)
 					continue
 				}
@@ -600,6 +645,8 @@ func (s *Service) repairEmbeddings(ctx context.Context, c caller, report func(Re
 // as it is still this caller's and each entry is still the one that was
 // read, drops the entries of chats that are gone, and is how many entries
 // were repaired and how many the index holds.
+// applyRepairs 将修复与标记写入索引，前提是索引仍属于本调用方、且每个条目仍是当初读到的那个；
+// 同时删除已消失聊天的条目。返回已修复条目数与索引持有的条目总数。
 func (s *Service) applyRepairs(ctx context.Context, c caller, repairs []embeddingRepair, blocked []embeddingBlocked, gone []string) (repaired, total int, err error) {
 	owner := c.owner()
 	unlock := s.lock(owner)

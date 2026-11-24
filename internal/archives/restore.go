@@ -20,10 +20,12 @@ import (
 
 // nativeBackup is a native backup whose every entry was found listed in
 // its manifest and matching its hash.
+// nativeBackup 是每个条目都已在 manifest 中列出且与 hash 匹配的原生 backup。
 type nativeBackup struct {
 	manifest BackupManifest
 	entries  map[string]*zip.File
 	// images are the backup's images by id, and their ids by chat.
+	// images 按 id 保存 backup 中的 image，并按 chat 保存其 id。
 	images     map[string]backupImage
 	chatImages map[string][]string
 }
@@ -32,6 +34,7 @@ var errInvalidBackup = func(why string) error { return api.Err(400, "IMPORT_INVA
 
 // openNativeBackup checks an archive that names itself a native backup,
 // or returns nil for any other archive.
+// openNativeBackup 校验自称原生 backup 的归档，其他归档则返回 nil。
 func openNativeBackup(zr *zip.Reader) (*nativeBackup, error) {
 	var manifestFile *zip.File
 	for _, f := range zr.File {
@@ -124,6 +127,7 @@ func checkEntryHash(f *zip.File, want string) error {
 }
 
 // readImage reads an image's description, which must sit beside its bytes.
+// readImage 读取 image 的描述，该描述必须与其字节相邻存放。
 func (b *nativeBackup) readImage(f *zip.File) error {
 	var image backupImage
 	if err := decodeEntry(f, &image); err != nil {
@@ -138,6 +142,7 @@ func (b *nativeBackup) readImage(f *zip.File) error {
 }
 
 // listed are the backup's entries of one kind, in manifest order.
+// listed 返回 backup 中某一 kind 的条目，按 manifest 顺序。
 func (b *nativeBackup) listed(kind string) []*zip.File {
 	var files []*zip.File
 	for _, file := range b.manifest.Files {
@@ -150,6 +155,7 @@ func (b *nativeBackup) listed(kind string) []*zip.File {
 
 // chatData reads one of the backup's chats, which must be filed under its
 // id. Its images were checked when the backup was opened.
+// chatData 读取 backup 中的一个 chat，它必须按其 id 存放。其 image 已在打开 backup 时校验。
 func chatData(f *zip.File) (string, []byte, error) {
 	data, err := readEntry(f, maxArchiveJSONEntry)
 	if err != nil {
@@ -168,6 +174,8 @@ func chatData(f *zip.File) (string, []byte, error) {
 // that is not a supported image. It counts those a page or an old message
 // shows, which leave nothing behind; an attachment left without its image
 // is counted when the chat is prepared.
+// chat 读取 backup 中的一个 chat 及其 image，忽略不支持的 image。它会统计那些仅由 page 或旧消息
+// 展示、不留下任何内容的 image；被留下却没有 image 的 attachment 会在 chat 准备阶段统计。
 func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, domain.Thread, error) {
 	chatID, data, err := chatData(f)
 	if err != nil {
@@ -192,6 +200,8 @@ func (b *nativeBackup) chat(f *zip.File, warnings *importWarnings) (string, doma
 // native restores a backup. With cloud storage its projects, documents and
 // cloud chats go to the cloud, and its local chats to the device; on the
 // device alone every chat goes to the device and projects are left out.
+// native 恢复一个 backup。有云存储时，其 project、document 和 cloud chat 上云，local chat 到设备；
+// 仅设备时，所有 chat 都到设备，project 被忽略。
 func (j *importRun) native(ctx context.Context, b *nativeBackup) error {
 	j.recognized, j.source = true, b.manifest.BackupID
 	for _, o := range b.manifest.Omissions {
@@ -204,6 +214,7 @@ func (j *importRun) native(ctx context.Context, b *nativeBackup) error {
 		device = b.listed("local_chats")
 		// A device chat that cannot be read fails the restore before the
 		// cloud's part is stored.
+		// 无法读取的设备 chat 会在云端部分存储之前就让 restore 失败。
 		for _, f := range device {
 			if _, _, err := chatData(f); err != nil {
 				return err
@@ -229,6 +240,7 @@ func (j *importRun) native(ctx context.Context, b *nativeBackup) error {
 	}
 	if j.key == nil {
 		// A backup holding only projects has nothing for the device.
+		// 仅含 project 的 backup 没有可放到设备的内容。
 		return j.complete(ctx)
 	}
 	return nil

@@ -33,31 +33,41 @@ import (
 // cloud is written to a cloud archive, which a background job stores.
 // Chats for the device are streamed back as NDJSON, one thread per line,
 // and nothing of them is kept.
+// import 在 harness 中读取上传的归档：任意版本的原生 backup，或 ChatGPT、Claude、Tinfoil export。
+// 上云的内容被写入一个 cloud archive，由后台 job 存储。面向设备的 chat 以 NDJSON 流式返回，
+// 每行一个 thread，且不保留任何内容。
 
 const (
 	// maxImportBody bounds an upload: the archive and its options.
+	// maxImportBody 限制上传的大小：归档及其选项。
 	maxImportBody = 512<<20 + 1<<20
 	// importSpaceFactor is the space an import expects to need: its upload
 	// and the cloud archive written from it, which is no larger than the
 	// upload it comes from.
+	// importSpaceFactor 是 import 预期需要的空间：其上传，以及从上传写出的 cloud archive（不会超过来源上传）。
 	importSpaceFactor = 2
 	// An import refuses an archive past these.
+	// 超过以下限值的归档，import 会拒绝。
 	maxImportChats       = 100_000
 	maxImportMessages    = 2_000_000
 	maxImportAttachments = 100_000
 	// cloudImportFormat names the rows an import stores, as the rows
 	// earlier imports stored are named.
+	// cloudImportFormat 命名 import 存储的行，与早期 import 存储的行同名。
 	cloudImportFormat = "tinfoil-native-cloud-import"
 	// cloudImportSource is what the control plane is told an import was
 	// of: the archive the harness wrote, whatever its upload was.
+	// cloudImportSource 是告知 control plane 的 import 来源：即 harness 写出的归档，无论其上传是什么。
 	cloudImportSource = "tinfoil_backup"
 )
 
 // importNamespace names the ids an import derives, so importing the same
 // conversation again gives it the same ids.
+// importNamespace 命名 import 派生的 id，使再次导入同一对话时得到相同的 id。
 var importNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://chat.tinfoil.sh/import"))
 
 // sniffedImages are the image types an import stores.
+// sniffedImages 是 import 存储的 image 类型。
 var sniffedImages = []string{"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
 
 type importOptions struct {
@@ -65,9 +75,11 @@ type importOptions struct {
 	Target string `json:"target"`
 }
 
+// HandleImport 处理 import 请求，读取上传的归档并按目标上云或流式返回设备 chat。
 func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 	// An archive calls no model, so any caller may make one, with or
 	// without chat access: a signed-out caller into its tab.
+	// 归档不调用模型，因此任何调用方都可创建，无论是否拥有 chat 访问权：匿名调用方写入其标签页。
 	p, err := ar.Auth.Caller(r, true)
 	if err != nil {
 		api.Respond(w, nil, err)
@@ -111,6 +123,7 @@ func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 		}
 		// The cloud takes new rows only under the registered key, so an
 		// archive sealed under another is refused before it is read.
+		// 云端只接受已注册 key 下的新行，因此用其他 key 封存的归档会在读取前被拒绝。
 		key, err := auth.DecodeContentKey(options.Key)
 		if err != nil {
 			return err
@@ -147,6 +160,7 @@ func (ar *Service) HandleImport(w http.ResponseWriter, r *http.Request) {
 
 // requestSize is the space a request body may take: its declared length,
 // or the most it may hold.
+// requestSize 是请求体可能占用的空间：其声明的长度，或其允许的最大值。
 func requestSize(r *http.Request, limit int64) (int64, error) {
 	switch {
 	case r.ContentLength > limit:
@@ -211,6 +225,7 @@ func readImportForm(r *http.Request, lease *Lease, authorize func(importOptions)
 
 // formError is a multipart body's failure: the harness's own refusal, a
 // body over its limit, or a malformed form.
+// formError 表示 multipart 体的失败：harness 自身的拒绝、超过限制的体，或格式错误的表单。
 func formError(err error) error {
 	var refused *api.Error
 	if errors.As(err, &refused) {
@@ -235,6 +250,7 @@ func decodeFormField(part *multipart.Part, v any) error {
 }
 
 // importRun is one import: where its chats go and what it left out.
+// importRun 表示一次 import：其 chat 的去向以及省略的内容。
 type importRun struct {
 	h     *Service
 	p     *auth.Principal
@@ -244,8 +260,10 @@ type importRun struct {
 	cloud *cloudArchive
 	jobID *string
 	// source names what the chats came from, which their derived ids keep.
+	// source 命名 chat 的来源，派生的 id 会保留该来源。
 	source string
 	// seen holds the conversations already read, which a split export repeats.
+	// seen 保存已读取的对话，分割的 export 会重复它们。
 	seen                         map[string]bool
 	chats, messages, attachments int
 	recognized                   bool
@@ -279,6 +297,7 @@ func (j *importRun) run(ctx context.Context, upload *scratchFile) error {
 }
 
 // importError is an error reading an export, as the client is told it.
+// importError 是读取 export 时的错误，按告知客户端的形式呈现。
 func importError(err error) error {
 	if errors.Is(err, importer.ErrInvalid) {
 		return api.Err(400, "IMPORT_INVALID", "The export cannot be read: "+strings.TrimPrefix(err.Error(), importer.ErrInvalid.Error()+": "))
@@ -287,6 +306,7 @@ func importError(err error) error {
 }
 
 // complete stores what goes to the cloud once every record is read.
+// complete 在所有记录读取完毕后，存储上云的内容。
 func (j *importRun) complete(ctx context.Context) error {
 	if !j.recognized {
 		return api.Err(400, "IMPORT_INVALID", "This file is not a Tinfoil backup or a ChatGPT, Claude or Tinfoil export")
@@ -338,6 +358,7 @@ func (j *importRun) record(record json.RawMessage, index *importer.Index, read f
 }
 
 // export reads a ZIP export of ChatGPT, Claude or Tinfoil.
+// export 读取 ChatGPT、Claude 或 Tinfoil 的 ZIP export。
 func (j *importRun) export(ctx context.Context, zr *zip.Reader) error {
 	files := map[string]*zip.File{}
 	var names []string
@@ -383,6 +404,8 @@ var splitConversations = regexp.MustCompile(`^conversations-([0-9]+)\.json$`)
 // conversationFiles are the conversations of an export: conversations.json
 // and the parts ChatGPT splits a large history into, in the shallowest
 // folder that has them.
+// conversationFiles 是 export 中的对话：conversations.json，以及 ChatGPT 把长历史拆分的各部分，
+// 取包含它们的最浅层文件夹。
 func conversationFiles(names []string) []string {
 	var found []string
 	for _, name := range names {
@@ -405,6 +428,7 @@ func conversationFiles(names []string) []string {
 
 // projectFiles are Claude's projects: one projects.json, or one file per
 // project in a projects folder at the top of the archive.
+// projectFiles 是 Claude 的 project：一个 projects.json，或归档顶层 projects 文件夹中每个 project 一个文件。
 func projectFiles(names []string) []string {
 	var found, split []string
 	for _, name := range names {
@@ -437,6 +461,7 @@ func shallowest(names []string) []string {
 }
 
 // conversation imports one chat of an export.
+// conversation 导入 export 中的一个 chat。
 func (j *importRun) conversation(c *importer.Conversation, read func(string) ([]byte, error)) error {
 	if c == nil || j.seen[c.Key] {
 		return nil
@@ -452,6 +477,7 @@ func (j *importRun) conversation(c *importer.Conversation, read func(string) ([]
 // conversationThread is an export's conversation in the thread format.
 // Its message ids derive from the conversation, so the cloud and the
 // device get the same thread.
+// conversationThread 是 export 对话的 thread 格式。其消息 id 由对话派生，使云端与设备得到相同的 thread。
 func (j *importRun) conversationThread(c *importer.Conversation, read func(string) ([]byte, error)) domain.Thread {
 	var first time.Time
 	if len(c.Messages) > 0 {
@@ -504,6 +530,7 @@ func isoString(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // project imports a Claude project with its documents. Projects are kept
 // in the cloud only.
+// project 导入一个 Claude project 及其 document。project 只保存在云端。
 func (j *importRun) project(project *importer.Project) error {
 	if j.key == nil {
 		j.warnings.projectsSkipped++
@@ -528,6 +555,8 @@ func (j *importRun) project(project *importer.Project) error {
 // prepare leaves out of an imported chat what no client may keep: run
 // state, server keys, messages of other roles, and attachments without
 // their content. It counts what it leaves out.
+// prepare 从导入的 chat 中剔除任何客户端都不该保留的内容：run 状态、服务端 key、其他角色的消息，
+// 以及无内容的 attachment。它统计被剔除的数量。
 func (j *importRun) prepare(t *domain.Thread) error {
 	t.ActiveRun, t.ContextUsage, t.HiddenCount, t.Flagged, t.ImportedFrom = nil, nil, 0, false, nil
 	t.LastRequestID, t.LastRequestKind = "", ""
@@ -573,6 +602,7 @@ func (j *importRun) prepare(t *domain.Thread) error {
 
 // toDevice streams a chat back to its client under an id derived from the
 // account, the source and the chat, so importing it again names it the same.
+// toDevice 以由账户、来源和 chat 派生的 id 把 chat 流式返回给客户端，使再次导入时命名一致。
 func (j *importRun) toDevice(sourceID string, t *domain.Thread) error {
 	if err := j.prepare(t); err != nil {
 		return err
@@ -589,6 +619,8 @@ func (j *importRun) toDevice(sourceID string, t *domain.Thread) error {
 // ImportThread is a device chat as its line carries it: each image as the
 // copy and thumbnail an upload makes, with the archive's original beside it
 // for its client to keep apart from the thread.
+// ImportThread 是设备 chat 在其行中的表示：每张 image 以上传生成的副本和缩略图形式出现，
+// 并附归档原件，供客户端与 thread 区分保存。
 type ImportThread struct {
 	domain.Thread
 	Messages []importMessage `json:"messages"`
@@ -645,6 +677,7 @@ func (j *importRun) cloudArchive() (*cloudArchive, error) {
 }
 
 // importWarnings count what an import left out.
+// importWarnings 统计 import 省略的内容。
 type importWarnings struct {
 	imagesLeftOut, documentsLeftOut, projectsSkipped, projectLinksDropped, backupOmissions int
 }
@@ -671,6 +704,8 @@ func (w importWarnings) list() []string {
 // importStream answers an import: a line per device chat, then one that
 // says it is done. An import that fails before its first line answers with
 // an error alone; one that fails after ends with an error line.
+// importStream 应答一次 import：每个设备 chat 一行，最后一行说明完成。首行之前失败时只返回错误；
+// 之后失败则以错误行结束。
 type importStream struct {
 	w       http.ResponseWriter
 	enc     *json.Encoder
@@ -683,6 +718,7 @@ type importLine struct {
 	Error  *api.Error    `json:"error,omitempty"`
 }
 
+// ImportDone 报告 import 的完成结果：后台 job id 与警告列表。
 type ImportDone struct {
 	JobID    *string  `json:"jobId"`
 	Warnings []string `json:"warnings"`
@@ -722,12 +758,15 @@ func (s *importStream) finish(jobID *string, warnings []string, err error) {
 }
 
 // errAttachmentMissing is an attachment whose bytes its source does not hold.
+// errAttachmentMissing 表示其来源未持有字节的 attachment。
 var errAttachmentMissing = api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
 
 // A cloud archive holds what an import puts in the cloud, for the job
 // that stores it: one entry per project, document and chat, each chat
 // image's bytes as a blob, and a manifest listing the entities with where
 // each came from.
+// cloud archive 保存 import 上云的内容，供存储它的 job 使用：每个 project、document、chat 一个条目，
+// 每个 chat image 的字节作为一个 blob，以及一份 manifest，列出各实体及其来源。
 type cloudArchive struct {
 	file     *scratchFile
 	zip      *zip.Writer
@@ -744,6 +783,8 @@ type cloudManifest struct {
 
 // cloudEntity is one project, document or chat: the source's id for it,
 // the source's id for its project, and the entry that holds it.
+// cloudEntity 是一个 project、document 或 chat：含其在来源中的 id、其 project 在来源中的 id，
+// 以及持有它的条目。
 type cloudEntity struct {
 	Kind            string `json:"kind"`
 	SourceID        string `json:"sourceId"`
@@ -752,6 +793,7 @@ type cloudEntity struct {
 }
 
 // cloudProject and cloudDocument hold what the cloud keeps of each.
+// cloudProject 与 cloudDocument 保存云端对各自的保留内容。
 type cloudProject struct {
 	Name               string `json:"name"`
 	Description        string `json:"description,omitempty"`
@@ -768,6 +810,7 @@ type cloudDocument struct {
 
 // cloudChat is a prepared thread with each image's bytes in a blob of the
 // archive, named by the attachment, instead of inline.
+// cloudChat 是已 prepare 的 thread，其每张 image 的字节放在归档的 blob 中，由 attachment 命名，而非内联。
 type cloudChat struct {
 	domain.Thread
 	Messages []cloudMessage `json:"messages"`
@@ -797,6 +840,7 @@ func (c *cloudArchive) entity(kind, sourceID, projectSourceID string, payload an
 }
 
 // chat writes a prepared thread, its images as blobs.
+// chat 写出一个已 prepare 的 thread，其 image 作为 blob。
 func (c *cloudArchive) chat(sourceID, projectSourceID string, t *domain.Thread) error {
 	payload := cloudChat{Thread: *t, Messages: make([]cloudMessage, 0, len(t.Messages))}
 	payload.ProjectID = nil

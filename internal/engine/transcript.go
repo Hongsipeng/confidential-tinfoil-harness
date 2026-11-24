@@ -11,6 +11,9 @@ import (
 // reply: a new or edited question, or the cut a regeneration or
 // continuation starts from. An answer to the last question, or a compaction,
 // changes nothing.
+// applyTurn 在其回复之前对记录应用该 turn 的 kind 所对应的更改：新增或编辑的问题，
+// 或 regenerate 或 continue 所起始的截断。对最后一个问题的回答，或 compaction，
+// 则不改变任何内容。
 func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments []domain.Attachment) error {
 	if t.MessageIndex(messageID) >= 0 {
 		return nil
@@ -21,6 +24,7 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 	if in.Kind == "edit" || in.Kind == "regenerate" || in.Kind == "continue" {
 		index := t.MessageIndex(in.MessageID)
 		// A continuation names its reply or extends the last message.
+		// continue 会指定其回复，或延伸最后一条消息。
 		if in.Kind == "continue" && in.MessageID == "" {
 			index = len(messages) - 1
 		}
@@ -48,9 +52,11 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 				quote = messages[index].Quote
 			}
 			// An edited question still asks for deep research if it did.
+			// 编辑过的问题若原本请求深入研究，则仍会请求深入研究。
 			research = messages[index].Research
 		}
 		// As on the web client, the continued reply becomes the last message.
+		// 与 web 客户端一样，被 continue 的回复会成为最后一条消息。
 		if in.Kind == "continue" {
 			index++
 		}
@@ -63,6 +69,7 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 		message := domain.Message{ID: messageID, Role: "user", Content: content, Quote: quote, Attachments: attachments, CreatedAt: api.Timestamp(), Research: research}
 		// A question sends the answers the user gave since the last one, so
 		// later changes leave what earlier replies read as it was.
+		// 问题会附带用户自上一个问题以来给出的回答，这样之后的更改就不会影响更早回复所读到的内容。
 		if in.Kind == "send" || in.Kind == "edit" {
 			message.Answers = domain.PendingAnswers(messages)
 		}
@@ -80,6 +87,10 @@ func applyTurn(t *domain.Thread, in *TurnRequest, messageID string, attachments 
 // again, any other last reply is regenerated, and a last question without a
 // reply is answered. A marker that ends the chat is read past, so the reply
 // it covers is regenerated or continued without it.
+// retried 是 retry 所执行的 turn，由聊天决定：失败的 compaction 会再次压缩，
+// 失败或被停止的 continue 会再次继续，其他最后一条回复会被 regenerate，
+// 而没有回复的最后一个问题会被回答。结束聊天的标记会被读过去，这样它所覆盖的回复
+// 就会在无标记的情况下被 regenerate 或 continue。
 func retried(t *domain.Thread, in *TurnRequest) (*TurnRequest, error) {
 	messages := t.Messages
 	if n := len(messages); n > 1 && messages[n-1].Role == domain.CompactionRole {

@@ -1,6 +1,7 @@
 // Package controlplane is the harness's client for the control plane's
 // storage API: the sealed rows, the key registry, the attachment index,
 // the search index state and the cleanup queues it keeps for the enclave.
+// 包 controlplane 是 harness 针对 control plane 存储 API 的客户端：为 enclave 维护的密封行、密钥注册表、附件索引、搜索索引状态以及清理队列。
 
 package controlplane
 
@@ -30,20 +31,27 @@ import (
 // JWT because they have no associated user request; they
 // authenticate to the controlplane with the service credential
 // alone.
+// Client 代表已认证用户与 controlplane 通信。
+// 用户驱动的调用会把用户的 JWT 原样放入 Authorization header，并附上 /api/sync 接口所要求的
+// enclave 服务凭据。少数 enclave 内部维护调用（附件与搜索索引清理）会跳过 JWT，因为它们
+// 没有关联的用户请求；它们仅用服务凭据向 controlplane 认证。
 type Client struct {
 	baseURL       string
 	httpClient    *http.Client
 	serviceSecret string
 }
 
+// Option 是 Client 的可选配置。
 type Option func(*Client)
 
+// WithServiceSecret 设置 Client 的服务密钥。
 func WithServiceSecret(secret string) Option {
 	return func(c *Client) {
 		c.serviceSecret = secret
 	}
 }
 
+// NewClient 构造一个指向 baseURL 的 controlplane 客户端。
 func NewClient(baseURL string, httpClient *http.Client, opts ...Option) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -71,6 +79,14 @@ func NewClient(baseURL string, httpClient *http.Client, opts ...Option) *Client 
 // convenience; the same applies to StatusLegacyBlobNotMigrated, which
 // the enclave returns to its own clients but the controlplane does not
 // emit.
+// 下面的 Header* 与 Status* 常量镜像了 github.com/tinfoilsh/controlplane/pkg/contract
+// （headers.go、sentinels.go、wirecodes.go）中定义的规范线上契约。保留本地副本而非导入
+// controlplane 模块，是为了保持 enclave 的独立构建面（参见 go.mod —— 按设计不依赖
+// controlplane）；client_contract_test.go 中的 pin 测试会在任何常量偏离规范值时使 CI 失败。
+//
+// HeaderContentType / HeaderServiceSecret / HeaderAuth 是仅限 enclave 使用的（不属于公开的
+// /api/sync/* 契约），为方便起见定义于此；StatusLegacyBlobNotMigrated 同样如此，该状态由
+// enclave 返回给它自己的客户端，而 controlplane 并不发出它。
 const (
 	HeaderAuth                = "Authorization"
 	HeaderKeyID               = "X-Key-Id"
@@ -93,9 +109,13 @@ const (
 	// it stands in for a fresh Clerk bearer token on the
 	// controlplane, so long migrations do not break when the proxied
 	// JWT expires mid-loop.
+	// HeaderClerkUserID 携带 enclave 已经从用户 JWT 中验证出的用户 id。它与 HeaderServiceSecret
+	// 配合，在 controlplane 上代替一个全新的 Clerk bearer token，这样当被代理的 JWT 在循环中途
+	// 过期时，长时间运行的迁移也不会中断。
 	HeaderClerkUserID = "X-Clerk-User-Id"
 )
 
+// If-Match 哨兵值与同步协议版本常量。
 const (
 	IfMatchCreateOnly     = "0"
 	IfMatchAnyKey         = "*"
@@ -103,6 +123,7 @@ const (
 	ProfileSyncProtocolV2 = 2
 )
 
+// controlplane 返回的状态码哨兵值。
 const (
 	StatusPreconditionRequired       = "PRECONDITION_REQUIRED"
 	StatusStaleKey                   = "STALE_KEY"
@@ -120,10 +141,13 @@ const (
 // maxLegacyAttachmentBytes caps the body read for legacy attachment
 // downloads. var (not const) so package tests can shrink it to keep
 // oversized-body regressions cheap to exercise.
+// maxLegacyAttachmentBytes 限制读取旧版附件下载内容的字节数。声明为 var（而非 const），以便包内
+// 测试可以调小它，从而以低成本覆盖超大响应体的回归场景。
 var maxLegacyAttachmentBytes = 64 << 20
 
 var maxSyncJSONResponseBytes = 32 << 20
 
+// PutBlob 的单次尝试超时与最大尝试次数。
 const (
 	PutBlobAttemptTimeout = 20 * time.Second
 	PutBlobMaxAttempts    = 2
@@ -131,6 +155,7 @@ const (
 
 // Error is a structured error returned from the controlplane. It contains
 // the parsed error code plus any contextual fields the controlplane sent.
+// Error 是 controlplane 返回的结构化错误。它包含解析出的错误码以及 controlplane 发送的任何上下文字段。
 type Error struct {
 	StatusCode   int    `json:"-"`
 	Code         string `json:"code"`
@@ -140,16 +165,20 @@ type Error struct {
 	// MinimumProtocol accompanies upgrade-required errors (e.g.
 	// PROFILE_SYNC_UPGRADE_REQUIRED) and names the lowest protocol
 	// version the controlplane still accepts.
+	// MinimumProtocol 伴随需要升级的错误（例如 PROFILE_SYNC_UPGRADE_REQUIRED），指明 controlplane 仍接受的最低协议版本。
 	MinimumProtocol int `json:"minimum_protocol,omitempty"`
 	// ResetsAt accompanies a limit the caller reached: when it lifts.
+	// ResetsAt 伴随调用者触达的某个限制：表示该限制何时解除。
 	ResetsAt string `json:"resets_at,omitempty"`
 	// MissingAttachments accompanies MISSING_ATTACHMENT: the ids the
 	// pushed chat referenced that the controlplane does not hold.
+	// MissingAttachments 伴随 MISSING_ATTACHMENT：即被推送的 chat 所引用、但 controlplane 并不持有的 id。
 	MissingAttachments []string        `json:"missing_attachments,omitempty"`
 	RetryAfterSeconds  int64           `json:"retry_after_seconds,omitempty"`
 	Raw                json.RawMessage `json:"-"`
 }
 
+// Error 返回该错误的字符串描述。
 func (e *Error) Error() string {
 	if e == nil {
 		return "<nil>"
@@ -167,6 +196,7 @@ func (e *Error) Error() string {
 // CAS token; KeyID is the row's last writer's KeyID. ProjectID is a
 // chat-scope side-channel that lets clients observe cross-project moves
 // without decrypting the row.
+// BlobMeta 描述一行数据对 controlplane 可见的元数据。ETag 是 CAS token；KeyID 是该行最后写入者的 KeyID。ProjectID 是一个 chat 作用域的旁路通道，让客户端无需解密该行即可观察跨 project 的移动。
 type BlobMeta struct {
 	ID        string    `json:"id"`
 	ETag      string    `json:"etag"`
@@ -175,10 +205,12 @@ type BlobMeta struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// ActivityAt is a chat row's list-ordering time: its last
 	// conversation activity, or UpdatedAt when none was recorded.
+	// ActivityAt 是 chat 行的列表排序时间：其最后一次会话活动时间，若未记录则取 UpdatedAt。
 	ActivityAt *time.Time `json:"activity_at,omitempty"`
 	Cursor     string     `json:"cursor,omitempty"`
 }
 
+// BlobDelete 是列表中的一条删除记录。
 type BlobDelete struct {
 	ID        string    `json:"id"`
 	Scope     string    `json:"scope"`
@@ -186,22 +218,26 @@ type BlobDelete struct {
 	Cursor    string    `json:"cursor,omitempty"`
 }
 
+// ListStatusResponse 是 list-status 的一页结果。
 type ListStatusResponse struct {
 	Updates    []BlobMeta   `json:"updates"`
 	Deletes    []BlobDelete `json:"deletes"`
 	NextCursor string       `json:"next_cursor,omitempty"`
 }
 
+// revision 摘要与删除全部 project 的端点路径。
 const (
 	RevisionSummaryPath   = "/api/sync/revision-summary"
 	DeleteAllProjectsPath = "/api/sync/blob/projects"
 )
 
+// RevisionSummaryResponse 是 revision 摘要的应答。
 type RevisionSummaryResponse struct {
 	CurrentRevision          string `json:"current_revision"`
 	OldestReplayableRevision string `json:"oldest_replayable_revision"`
 }
 
+// PutBlobRequest 是一次写入（Put）请求的参数。
 type PutBlobRequest struct {
 	Scope string
 	ID    string
@@ -210,6 +246,8 @@ type PutBlobRequest struct {
 	// enclave's auth boundary. Forwarded as X-Clerk-User-Id so the
 	// controlplane can accept the call via service auth and skip
 	// re-verifying the proxied JWT, which may expire mid-migration.
+	// ClerkUserID 是 enclave 认证边界处从用户 JWT 验证出的 subject。它以 X-Clerk-User-Id 转发，使
+	// controlplane 可以通过服务认证接受该调用，并跳过对可能中途过期的被代理 JWT 的再次验证。
 	ClerkUserID         string
 	KeyIDHex            string
 	IfMatch             string
@@ -223,6 +261,8 @@ type PutBlobRequest struct {
 	// column with ProjectID". When ProjectIDSet is false the column
 	// is left untouched. Nil ProjectID + ProjectIDSet=true clears
 	// the column. Only meaningful for chat scope.
+	// ProjectIDSet 表示“用 ProjectID 覆盖 controlplane 的 project_id 列”。当 ProjectIDSet 为 false
+	// 时该列保持不变。ProjectID 为 nil 且 ProjectIDSet=true 会清空该列。仅对 chat 作用域有意义。
 	ProjectIDSet bool
 	ProjectID    *string
 	// AttachmentRefs lists the buckets-backed attachment ids the chat
@@ -230,21 +270,29 @@ type PutBlobRequest struct {
 	// push (empty list included) so the controlplane can track which
 	// index rows are live and purge the rest. Nil means "do not send
 	// the header", which is only correct for non-chat scopes.
+	// AttachmentRefs 列出 chat 明文所引用的、由 buckets 承载的附件 id。它在每次 chat push 时以
+	// X-Attachment-Refs 发送（包括空列表），使 controlplane 能跟踪哪些索引行仍在使用并清理其余行。
+	// nil 表示“不发送该 header”，这仅对非 chat 作用域才正确。
 	AttachmentRefs []string
 	// ActivityAt is the chat's last conversation activity derived from
 	// the plaintext, sent as X-Activity-At. Nil omits the header, which
 	// makes the controlplane order the row by its write time.
+	// ActivityAt 是从明文推导出的 chat 最后一次会话活动时间，以 X-Activity-At 发送。nil 会省略该
+	// header，使 controlplane 按写入时间对该行排序。
 	ActivityAt *time.Time
 }
 
+// PutBlobResponse 是写入成功后的应答。
 type PutBlobResponse struct {
 	ETag           string `json:"etag"`
 	KeyID          string `json:"key_id"`
 	SourceRevision int64  `json:"source_revision,omitempty"`
 }
 
+// PutBlobAmbiguity 标识写入结果不确定的一种类别。
 type PutBlobAmbiguity string
 
+// PutBlob 结果不确定的各种原因。
 const (
 	PutBlobTransportFailure PutBlobAmbiguity = "transport_failure"
 	PutBlobUpstreamFailure  PutBlobAmbiguity = "upstream_failure"
@@ -255,29 +303,36 @@ const (
 
 // AmbiguousPutBlobError identifies an attempt whose write may have committed
 // even though the client could not confirm its outcome.
+// AmbiguousPutBlobError 标识一次尝试，其写入可能已经提交，但客户端无法确认结果。
 type AmbiguousPutBlobError struct {
 	Kind PutBlobAmbiguity
 	Err  error
 }
 
+// Error 返回该错误的字符串描述。
 func (e *AmbiguousPutBlobError) Error() string {
 	return fmt.Sprintf("controlplane: ambiguous PutBlob outcome (%s): %v", e.Kind, e.Err)
 }
 
+// Unwrap 返回底层错误。
 func (e *AmbiguousPutBlobError) Unwrap() error { return e.Err }
 
 // PutBlobOutcomeUnknownError means a dispatched write could not be confirmed,
 // so the caller must reconcile before writing again.
+// PutBlobOutcomeUnknownError 表示一次已派发的写入无法被确认，因此调用者必须在下一次写入前先进行对账。
 type PutBlobOutcomeUnknownError struct {
 	Err error
 }
 
+// Error 返回该错误的字符串描述。
 func (e *PutBlobOutcomeUnknownError) Error() string {
 	return fmt.Sprintf("controlplane: PutBlob outcome unknown: %v", e.Err)
 }
 
+// Unwrap 返回底层错误。
 func (e *PutBlobOutcomeUnknownError) Unwrap() error { return e.Err }
 
+// GetBlobResponse 是一次读取（Get）请求的应答。
 type GetBlobResponse struct {
 	Ciphertext   []byte
 	ETag         string
@@ -286,9 +341,11 @@ type GetBlobResponse struct {
 	ProjectID    *string
 	// ActivityAt is the chat row's recorded activity time. Nil means the
 	// row predates activity tracking and sorts by its write time.
+	// ActivityAt 是 chat 行已记录的活动时间。nil 表示该行早于活动跟踪功能，按写入时间排序。
 	ActivityAt *time.Time
 	// UpdatedAt is when the row was last written; zero when the control
 	// plane did not say.
+	// UpdatedAt 是该行最后一次被写入的时间；若 control plane 未提供则为零值。
 	UpdatedAt time.Time
 }
 
@@ -311,6 +368,10 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 // `sess.Claims.Subject` from the caller — never extracted from the
 // JWT payload here, so a malformed or attacker-supplied token cannot
 // influence the asserted identity.
+// addAuth 会盖上 Authorization header；当调用者传入在 enclave 认证边界验证过的用户 id 时，还会加上
+// X-Clerk-User-Id header，使 controlplane 可以通过服务认证接受请求，而无需再次验证可能中途过期的
+// JWT。该用户 id 必须是来自调用者的、已验证的 `sess.Claims.Subject` —— 绝不在此处从 JWT 载荷中提取，
+// 因此格式错误或攻击者提供的 token 无法影响所断言的标识。
 func (c *Client) addAuth(req *http.Request, rawJWT, clerkUserID string) {
 	if rawJWT != "" {
 		req.Header.Set(HeaderAuth, "Bearer "+rawJWT)
@@ -336,6 +397,11 @@ func (c *Client) urlFor(scope, id string) (string, error) {
 // All blob traffic lives under /api/sync/blob/* — a dedicated surface
 // for the enclave that does not overlap with the legacy /api/storage/*
 // and /api/profile/* endpoints the webapp drives directly today.
+// PathFor 返回给定 scope+id 对应的 controlplane 路径（不含 scheme/host）。导出它，是为了让调用者——
+// 尤其是 operation-hash 构建器——能够生成与线上实际发送内容完全一致的规范元组。
+//
+// 所有 blob 流量都位于 /api/sync/blob/* 之下——这是专供 enclave 使用的接口面，不与 webapp
+// 如今直接驱动的旧版 /api/storage/* 和 /api/profile/* 端点重叠。
 func PathFor(scope, id string) (string, error) {
 	switch scope {
 	case "chat":
@@ -362,6 +428,7 @@ func splitProjectDocID(id string) (parent, doc string, ok bool) {
 	return id[:idx], id[idx+1:], true
 }
 
+// PutBlob 写入一个 blob，并对结果不确定的失败做有界重试。
 func (c *Client) PutBlob(ctx context.Context, req PutBlobRequest) (*PutBlobResponse, error) {
 	if req.Rewrap {
 		return c.rewrapBlob(ctx, req)
@@ -398,6 +465,7 @@ func (c *Client) putBlobOnce(ctx context.Context, req PutBlobRequest) (*PutBlobR
 	}
 	// Disable net/http's transparent body replay so the bounded loop above is
 	// the only layer that can issue a second controlplane write.
+	// 禁用 net/http 的透明请求体重放，使上面的有界循环成为唯一可能发起第二次 controlplane 写入的层。
 	httpReq.GetBody = nil
 	c.addAuth(httpReq, req.JWT, req.ClerkUserID)
 	httpReq.Header.Set(HeaderContentType, "application/octet-stream")
@@ -488,11 +556,18 @@ func isRetryablePutBlobStatus(status int) bool {
 // RewrapPath is the controlplane path for the dedicated rewrap
 // endpoint. Exported so the enclave can hash the same canonical path
 // when computing X-Operation-Hash.
+// rewrapBlob 针对专用的 /api/sync/rewrap 端点。与 PutBlob 的主路径不同，rewrap 是一个 JSON POST，
+// 密文在请求体内以 base64 编码。controlplane 处理器会更新该行的 `data` + `key_id` + `etag`，而不
+// 增加 `sync_version` 或 `updated_at` —— 因此 rewrap 对用户可见的同步是无感知的。
+// RewrapPath 是专用 rewrap 端点对应的 controlplane 路径。导出它，是为了让 enclave 在计算
+// X-Operation-Hash 时能够对同一规范路径进行哈希。
 const RewrapPath = "/api/sync/rewrap"
 
 // RewrapBody marshals the body the rewrap call sends to the
 // controlplane. Exported so the enclave can compute X-Operation-Hash
 // over exactly the bytes that will hit the wire.
+// RewrapBody 序列化 rewrap 调用发送给 controlplane 的请求体。导出它，是为了让 enclave 能够对即将
+// 上线的字节精确计算 X-Operation-Hash。
 func RewrapBody(req PutBlobRequest) ([]byte, error) {
 	return json.Marshal(map[string]string{
 		"scope":          req.Scope,
@@ -547,6 +622,7 @@ func (c *Client) rewrapBlob(ctx context.Context, req PutBlobRequest) (*PutBlobRe
 	return &PutBlobResponse{ETag: out.ETag, KeyID: out.KeyID}, nil
 }
 
+// GetBlob 读取一个 blob 的密文及其元数据。
 func (c *Client) GetBlob(ctx context.Context, scope, id, jwt, clerkUserID string) (*GetBlobResponse, error) {
 	endpoint, err := c.urlFor(scope, id)
 	if err != nil {
@@ -591,6 +667,7 @@ func (c *Client) GetBlob(ctx context.Context, scope, id, jwt, clerkUserID string
 	return out, nil
 }
 
+// HeadBlob 仅读取一个 blob 的元数据，不返回其内容。
 func (c *Client) HeadBlob(ctx context.Context, scope, id, jwt, clerkUserID string) (*BlobMeta, error) {
 	endpoint, err := c.urlFor(scope, id)
 	if err != nil {
@@ -617,6 +694,7 @@ func (c *Client) HeadBlob(ctx context.Context, scope, id, jwt, clerkUserID strin
 	}, nil
 }
 
+// DeleteBlobRequest 是一次删除请求的参数。
 type DeleteBlobRequest struct {
 	Scope          string
 	ID             string
@@ -631,12 +709,15 @@ type DeleteBlobRequest struct {
 // shape. For chat deletes the controlplane returns the v2 attachment
 // ids it dropped, so the enclave can wipe the matching buckets blobs.
 // For non-chat scopes the field is empty.
+// DeleteBlobResponse 镜像 controlplane 的 `writeDeleteResponse*` 结构。对于 chat 删除，controlplane
+// 会返回它丢弃的 v2 附件 id，使 enclave 能擦除对应的 buckets blob。对于非 chat 作用域，该字段为空。
 type DeleteBlobResponse struct {
 	OK                 bool     `json:"ok"`
 	WipedV2Attachments []string `json:"wiped_v2_attachments,omitempty"`
 	SourceRevision     int64    `json:"source_revision,omitempty"`
 }
 
+// DeleteBlob 删除一个 blob。
 func (c *Client) DeleteBlob(ctx context.Context, req DeleteBlobRequest) (*DeleteBlobResponse, error) {
 	endpoint, err := c.urlFor(req.Scope, req.ID)
 	if err != nil {
@@ -677,6 +758,7 @@ func (c *Client) DeleteBlob(ctx context.Context, req DeleteBlobRequest) (*Delete
 	return out, nil
 }
 
+// DeleteAllProjectsRequest 是删除全部 project 请求的参数。
 type DeleteAllProjectsRequest struct {
 	JWT            string
 	ClerkUserID    string
@@ -685,11 +767,13 @@ type DeleteAllProjectsRequest struct {
 	OperationHash  string
 }
 
+// DeleteAllProjectsResponse 是删除全部 project 的应答。
 type DeleteAllProjectsResponse struct {
 	OK      bool `json:"ok"`
 	Deleted int  `json:"deleted"`
 }
 
+// DeleteAllProjects 删除当前用户的所有 project 与 project document。
 func (c *Client) DeleteAllProjects(ctx context.Context, req DeleteAllProjectsRequest) (*DeleteAllProjectsResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+DeleteAllProjectsPath, nil)
 	if err != nil {
@@ -720,11 +804,13 @@ func (c *Client) DeleteAllProjects(ctx context.Context, req DeleteAllProjectsReq
 
 // listStatusOmitDeletes asks list-status for live rows alone: no deletes,
 // and a cursor that pages past live rows only.
+// listStatusOmitDeletes 让 list-status 只返回存活行：不含删除记录，且游标只对存活行进行分页。
 const listStatusOmitDeletes = "omit"
 
 // ListStatus is one page of a scope's rows and deletes. omitDeletes leaves
 // the deletes out, so a listing of what exists is not paged by them; a
 // control plane without the option still sends them.
+// ListStatus 返回某个作用域的行与删除记录的一页。omitDeletes 会排除删除记录，因此对现存内容的列表不会因删除记录而分页；不支持该选项的 control plane 仍会发送它们。
 func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int, jwt, clerkUserID, projectID, direction string, omitDeletes bool) (*ListStatusResponse, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -769,6 +855,7 @@ func (c *Client) ListStatus(ctx context.Context, scope, cursor string, limit int
 	return &out, nil
 }
 
+// RevisionSummary 返回当前与最旧可回放的 revision。
 func (c *Client) RevisionSummary(ctx context.Context, jwt, clerkUserID string) (*RevisionSummaryResponse, error) {
 	var out RevisionSummaryResponse
 	if err := c.getSyncJSON(ctx, RevisionSummaryPath, nil, jwt, clerkUserID, &out); err != nil {
@@ -808,8 +895,10 @@ func (c *Client) getSyncJSON(ctx context.Context, path string, query url.Values,
 	return nil
 }
 
+// SearchIndexStatePath 是搜索索引状态的端点路径。
 const SearchIndexStatePath = "/api/sync/search-index"
 
+// SearchIndexState 描述搜索索引的发布状态。
 type SearchIndexState struct {
 	SourceRevision          int64  `json:"source_revision"`
 	PublicationGeneration   int64  `json:"publication_generation"`
@@ -822,6 +911,7 @@ type SearchIndexState struct {
 	PublicationIncomplete   bool   `json:"publication_incomplete"`
 }
 
+// PublishSearchIndexRequest 是一次搜索索引发布请求的参数。
 type PublishSearchIndexRequest struct {
 	JWT                   string
 	ClerkUserID           string
@@ -834,14 +924,17 @@ type PublishSearchIndexRequest struct {
 	Incomplete            bool
 }
 
+// SearchIndexConflictError 表示搜索索引发布冲突。
 type SearchIndexConflictError struct {
 	State SearchIndexState
 }
 
+// Error 返回该错误的字符串描述。
 func (e *SearchIndexConflictError) Error() string {
 	return "controlplane: search index publication conflict"
 }
 
+// GetSearchIndexState 读取当前搜索索引状态。
 func (c *Client) GetSearchIndexState(ctx context.Context, jwt, clerkUserID string) (*SearchIndexState, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+SearchIndexStatePath, nil)
 	if err != nil {
@@ -867,6 +960,7 @@ func (c *Client) GetSearchIndexState(ctx context.Context, jwt, clerkUserID strin
 	return &state, nil
 }
 
+// PublishSearchIndex 发布一个新的搜索索引对象。
 func (c *Client) PublishSearchIndex(ctx context.Context, req PublishSearchIndexRequest) (*SearchIndexState, error) {
 	body, err := json.Marshal(map[string]any{
 		"expected_generation":     req.ExpectedGeneration,
@@ -914,12 +1008,14 @@ func (c *Client) PublishSearchIndex(ctx context.Context, req PublishSearchIndexR
 	return &state, nil
 }
 
+// ListNeedsMigrationResponse 是需要迁移列表的应答。
 type ListNeedsMigrationResponse struct {
 	IDs                []string `json:"ids"`
 	RetryableRemaining int      `json:"retryable_remaining"`
 	BlockedUnmigrated  int      `json:"blocked_unmigrated"`
 }
 
+// ListNeedsMigration 列出某个作用域中需要重新密封的行。
 func (c *Client) ListNeedsMigration(ctx context.Context, scope string, limit int, jwt, clerkUserID string) (*ListNeedsMigrationResponse, error) {
 	endpoint := c.baseURL + "/api/sync/needs-migration"
 	q := url.Values{}
@@ -954,6 +1050,7 @@ func (c *Client) ListNeedsMigration(ctx context.Context, scope string, limit int
 // decrypt the legacy blob. The controlplane stamps the row with the current
 // timestamp so it is excluded from the next batch until the 24h cooldown
 // elapses.
+// RecordMigrationFailure 告知 controlplane 对给定 (scope, id) 的迁移尝试失败，原因是所提供的密钥都无法解密旧 blob。controlplane 会用当前时间戳标记该行，使其在 24 小时冷却期结束前不会进入下一批。
 func (c *Client) RecordMigrationFailure(ctx context.Context, scope, id, jwt, clerkUserID string) error {
 	endpoint := c.baseURL + "/api/sync/migration-failure"
 	body, _ := json.Marshal(map[string]string{"scope": scope, "id": id})
@@ -977,12 +1074,14 @@ func (c *Client) RecordMigrationFailure(ctx context.Context, scope, id, jwt, cle
 
 // ChatActivityPath is the controlplane endpoint that fills in the
 // activity time of a chat row written before it was tracked.
+// ChatActivityPath 是补填早于活动跟踪写入的 chat 行活动时间的 controlplane 端点。
 const ChatActivityPath = "/api/sync/chat-activity"
 
 // BackfillChatActivity records the activity time derived from a chat
 // whose row has none. The controlplane applies it only while the row is
 // still at etag and has no activity time, so losing that race is not an
 // error.
+// BackfillChatActivity 为没有活动时间的 chat 行记录从其推导出的活动时间。controlplane 只会在该行仍处于该 etag 且尚无活动时间时应用它，因此输掉该竞争不算错误。
 func (c *Client) BackfillChatActivity(ctx context.Context, jwt, clerkUserID, id, etag string, activityAt time.Time) error {
 	body, err := json.Marshal(map[string]string{
 		"id":          id,
@@ -1011,7 +1110,9 @@ func (c *Client) BackfillChatActivity(ctx context.Context, jwt, clerkUserID, id,
 }
 
 // --- key registry ----------------------------------------------------------
+// --- 密钥注册表 ------------------------------------------------------------
 
+// CurrentKeyResponse 是当前密钥的应答。
 type CurrentKeyResponse struct {
 	KeyID      string                      `json:"key_id"`
 	ETag       string                      `json:"etag"`
@@ -1022,10 +1123,14 @@ type CurrentKeyResponse struct {
 	// response carries an empty `created_at`, which fails time.Time
 	// decoding; keeping them as strings tolerates that and avoids a
 	// lossy parse-then-reformat round-trip on the way to the client.
+	// CreatedAt 与 RegisteredAt 按 controlplane 已格式化好的 RFC3339 字符串解码，而不是 time.Time。
+	// 无密钥应答会携带空的 `created_at`，这会导致 time.Time 解码失败；保持为字符串可以容忍这一点，
+	// 并避免在转发给客户端时经历一次有损的“解析后再格式化”往返。
 	CreatedAt string `json:"created_at"`
 	HasData   bool   `json:"has_data"`
 }
 
+// CurrentKeyBundle 是当前密钥的某个 passkey bundle。
 type CurrentKeyBundle struct {
 	CredentialID  string `json:"credential_id"`
 	KEKIV         string `json:"kek_iv"`
@@ -1033,6 +1138,7 @@ type CurrentKeyBundle struct {
 	RegisteredAt  string `json:"registered_at"`
 }
 
+// GetCurrentKey 读取当前密钥及其 bundle。
 func (c *Client) GetCurrentKey(ctx context.Context, jwt, clerkUserID string) (*CurrentKeyResponse, error) {
 	endpoint := c.baseURL + "/api/sync/keys/current"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -1059,6 +1165,7 @@ func (c *Client) GetCurrentKey(ctx context.Context, jwt, clerkUserID string) (*C
 	return &out, nil
 }
 
+// RegisterKeyRequest 是注册密钥请求的参数。
 type RegisterKeyRequest struct {
 	JWT            string
 	ClerkUserID    string
@@ -1070,6 +1177,7 @@ type RegisterKeyRequest struct {
 	InitialBundle  *RegisterKeyBundle
 }
 
+// RegisterKeyBundle 是注册时提供的初始密钥 bundle。
 type RegisterKeyBundle struct {
 	CredentialID  string `json:"credential_id"`
 	KEKIV         string `json:"kek_iv"`
@@ -1079,6 +1187,8 @@ type RegisterKeyBundle struct {
 // RegisterKeyBody returns the JSON body bytes that will be sent for the
 // given RegisterKey request. Exported so callers can hash the exact
 // bytes that go on the wire as part of the operation-hash canonical tuple.
+// RegisterKeyBody 返回将随给定 RegisterKey 请求发送的 JSON 请求体字节。导出它，是为了让调用者能够
+// 对即将上线的确切字节进行哈希，作为 operation-hash 规范元组的一部分。
 func RegisterKeyBody(req RegisterKeyRequest) ([]byte, error) {
 	payload := map[string]any{
 		"key_id":      req.KeyIDHex,
@@ -1091,12 +1201,15 @@ func RegisterKeyBody(req RegisterKeyRequest) ([]byte, error) {
 }
 
 // RegisterKeyPath is the controlplane path the RegisterKey call targets.
+// RegisterKeyPath 是 RegisterKey 调用所针对的 controlplane 路径。
 const RegisterKeyPath = "/api/sync/keys"
 
 // RegisterKeyResponse mirrors the wire body the controlplane emits on
 // a successful `POST /api/sync/keys`. `WipedV2Attachments` is
 // populated only when the call hit the start-fresh bypass; on every
 // other path it is nil/empty.
+// RegisterKeyResponse 镜像 controlplane 在 `POST /api/sync/keys` 成功时返回的线上响应体。只有当调用
+// 命中了 start-fresh 旁路时才会填充 `WipedV2Attachments`；在其余路径上它都是 nil/空。
 type RegisterKeyResponse struct {
 	OK                 bool     `json:"ok"`
 	KeyID              string   `json:"key_id"`
@@ -1105,6 +1218,7 @@ type RegisterKeyResponse struct {
 	WipedV2Attachments []string `json:"wiped_v2_attachments,omitempty"`
 }
 
+// RegisterKey 注册或更换当前密钥。
 func (c *Client) RegisterKey(ctx context.Context, req RegisterKeyRequest) (*RegisterKeyResponse, error) {
 	endpoint := c.baseURL + RegisterKeyPath
 	body, err := RegisterKeyBody(req)
@@ -1145,6 +1259,7 @@ func (c *Client) RegisterKey(ctx context.Context, req RegisterKeyRequest) (*Regi
 	return out, nil
 }
 
+// AddBundleRequest 是添加密钥 bundle 请求的参数。
 type AddBundleRequest struct {
 	JWT            string
 	ClerkUserID    string
@@ -1159,6 +1274,8 @@ type AddBundleRequest struct {
 // AddBundleBody marshals the body of an add-bundle request. Exposed so
 // the enclave can hash exactly what will hit the wire when computing
 // X-Operation-Hash.
+// AddBundleBody 序列化 add-bundle 请求的请求体。导出它，是为了让 enclave 在计算 X-Operation-Hash 时
+// 能够对即将上线的内容进行精确哈希。
 func AddBundleBody(req AddBundleRequest) ([]byte, error) {
 	return json.Marshal(map[string]string{
 		"credential_id":  req.CredentialID,
@@ -1170,10 +1287,12 @@ func AddBundleBody(req AddBundleRequest) ([]byte, error) {
 // AddBundlePath is the controlplane path for the add-bundle endpoint.
 // Used by the enclave to keep the op-hash canonical path aligned
 // with the actual wire path.
+// AddBundlePath 是 add-bundle 端点对应的 controlplane 路径。enclave 用它来让 op-hash 的规范路径与实际线上路径保持一致。
 func AddBundlePath(keyIDHex string) string {
 	return "/api/sync/keys/" + url.PathEscape(keyIDHex) + "/bundles"
 }
 
+// AddBundle 为当前密钥添加一个 passkey bundle。
 func (c *Client) AddBundle(ctx context.Context, req AddBundleRequest) error {
 	endpoint := c.baseURL + AddBundlePath(req.KeyIDHex)
 	body, err := AddBundleBody(req)
@@ -1204,6 +1323,7 @@ func (c *Client) AddBundle(ctx context.Context, req AddBundleRequest) error {
 	return nil
 }
 
+// RemoveBundleRequest 是移除密钥 bundle 请求的参数。
 type RemoveBundleRequest struct {
 	JWT            string
 	ClerkUserID    string
@@ -1215,10 +1335,12 @@ type RemoveBundleRequest struct {
 
 // RemoveBundlePath returns the canonical wire path for a remove-bundle
 // request so callers can compute the op-hash over the same string.
+// RemoveBundlePath 返回 remove-bundle 请求的规范线上路径，以便调用者对同一字符串计算 op-hash。
 func RemoveBundlePath(keyIDHex, credentialID string) string {
 	return "/api/sync/keys/" + url.PathEscape(keyIDHex) + "/bundles/" + url.PathEscape(credentialID)
 }
 
+// RemoveBundle 从当前密钥移除一个 passkey bundle。
 func (c *Client) RemoveBundle(ctx context.Context, req RemoveBundleRequest) error {
 	endpoint := c.baseURL + RemoveBundlePath(req.KeyIDHex, req.CredentialID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
@@ -1258,6 +1380,7 @@ func parseError(status int, body []byte) error {
 }
 
 // IsCode reports whether err is a controlplane error with the given code.
+// IsCode 报告 err 是否是指定 code 的 controlplane 错误。
 func IsCode(err error, code string) bool {
 	var e *Error
 	if !errors.As(err, &e) {
@@ -1268,24 +1391,29 @@ func IsCode(err error, code string) bool {
 
 // ErrLegacyAttachmentNotFound is a legacy attachment the control plane
 // does not hold.
+// ErrLegacyAttachmentNotFound 表示 control plane 并不持有的旧版附件。
 var ErrLegacyAttachmentNotFound = errors.New("controlplane: legacy attachment not found")
 
 // ErrLegacyAttachmentGone is a legacy attachment already moved to buckets,
 // which the chat's embedded key addresses there as it is.
+// ErrLegacyAttachmentGone 表示一个已经迁移到 buckets 的旧版附件，chat 内嵌的 key 可以就地寻址它。
 var ErrLegacyAttachmentGone = errors.New("controlplane: legacy attachment already moved to buckets")
 
 // ErrLegacyClaimInvalid is a legacy attachment served without the control
 // plane's claim that it is the caller's, or with one the service secret
 // does not verify.
+// ErrLegacyClaimInvalid 表示某个旧版附件在提供时没有 control plane 关于它属于调用者的 claim，或者其 claim 无法通过服务密钥验证。
 var ErrLegacyClaimInvalid = errors.New("controlplane: legacy attachment claim invalid")
 
 // HeaderLegacyClaim carries the control plane's claim on a legacy
 // attachment it serves to the enclave.
+// HeaderLegacyClaim 携带 control plane 对它提供给 enclave 的旧版附件所做的 claim。
 const HeaderLegacyClaim = "X-Legacy-Claim"
 
 // legacyAttachmentClaim is what the control plane signs when it serves a
 // legacy attachment: the user, the attachment, and a digest of the bytes.
 // Fields are in alphabetical order, as the control plane marshals them.
+// legacyAttachmentClaim 是 control plane 提供旧版附件时签名的内容：用户、附件以及字节的摘要。字段按字母顺序排列，与 control plane 序列化的顺序一致。
 type legacyAttachmentClaim struct {
 	ClerkUserID string `json:"clerk_user_id"`
 	ID          string `json:"id"`
@@ -1297,6 +1425,8 @@ type legacyAttachmentClaim struct {
 // the control plane's own database rather than buckets, and checks the
 // control plane's claim that it is clerkUserID's: an HMAC under the
 // service secret over the user, the id and the bytes' digest.
+// GetLegacyAttachment 读取旧客户端存储的附件（存于 control plane 自己的数据库而非 buckets），并校验
+// control plane 关于它属于 clerkUserID 的 claim：即用服务密钥对用户、id 和字节摘要计算的 HMAC。
 func (c *Client) GetLegacyAttachment(ctx context.Context, jwt, clerkUserID, attachmentID string) ([]byte, error) {
 	if attachmentID == "" {
 		return nil, fmt.Errorf("controlplane: attachment id is required")
@@ -1357,6 +1487,9 @@ func (c *Client) legacyClaimValid(claim, clerkUserID, attachmentID string, ciphe
 // owned by this user, in v2 format." JWT is forwarded so the
 // controlplane resolves the user from claims, exactly like every
 // other storage route.
+// RegisterAttachmentIndex 向 controlplane 记录某个 v2 附件的所有权。密文本身存放于 buckets.tinfoil.sh
+// 下由 enclave 从 (CEK, attachmentID) 推导出的路径中；controlplane 只会得知“这个附件 id 存在于该 chat、
+// 属于该用户、格式为 v2”。JWT 会被转发，以便 controlplane 像其他所有存储路由一样从 claim 中解析用户。
 func (c *Client) RegisterAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID, chatID string) error {
 	return c.postAttachmentChatID(
 		ctx,
@@ -1371,8 +1504,10 @@ func (c *Client) RegisterAttachmentIndex(ctx context.Context, jwt, clerkUserID, 
 
 // ImportOutcomeStatus tells the controlplane whether an import job
 // finished or stopped early so it can pick the matching email.
+// ImportOutcomeStatus 告知 controlplane 某个导入任务是已完成还是提前停止，以便它选择相应的邮件。
 type ImportOutcomeStatus string
 
+// 导入结果的状态值。
 const (
 	ImportOutcomeCompleted ImportOutcomeStatus = "completed"
 	ImportOutcomeFailed    ImportOutcomeStatus = "failed"
@@ -1382,6 +1517,7 @@ const (
 // FailureReason and FailureDetail are only set when Status is
 // ImportOutcomeFailed and carry the enclave's user-safe classification
 // and the check that fired, never raw error text.
+// ImportOutcome 是导入通知回调的载荷。FailureReason 与 FailureDetail 仅在 Status 为 ImportOutcomeFailed 时设置，携带 enclave 面向用户的安全分类以及触发的原因，绝不包含原始错误文本。
 type ImportOutcome struct {
 	ClerkUserID   string
 	JobID         string
@@ -1398,6 +1534,9 @@ type ImportOutcome struct {
 // forward for a detached job (it may have expired mid-import), so this
 // is a service-secret call that asserts the user only via
 // X-Clerk-User-Id.
+// NotifyImportOutcome 请求 controlplane 向用户发送邮件，告知离线 chat 导入已完成或失败。对于分离的任务，
+// enclave 没有可转发的 JWT（它可能已在导入中途过期），因此这是一个仅通过 X-Clerk-User-Id 断言用户
+// 的服务密钥调用。
 func (c *Client) NotifyImportOutcome(ctx context.Context, outcome ImportOutcome) error {
 	if outcome.ClerkUserID == "" {
 		return fmt.Errorf("controlplane: clerk user id is required")
@@ -1442,10 +1581,12 @@ func (c *Client) NotifyImportOutcome(ctx context.Context, outcome ImportOutcome)
 
 // ResearchPath is where the control plane counts each user's deep
 // researches, which it allows one an hour.
+// ResearchPath 是 control plane 统计每个用户深度研究次数的端点，它允许每小时一次。
 const ResearchPath = "/api/sync/deep-research"
 
 // ResearchAllowance is whether a user may start a deep research now, and if
 // not, when they may.
+// ResearchAllowance 表示用户当前是否可以发起一次深度研究，以及若不可以，何时可以。
 type ResearchAllowance struct {
 	Available         bool   `json:"available"`
 	ResetsAt          string `json:"resets_at,omitempty"`
@@ -1456,6 +1597,8 @@ type ResearchAllowance struct {
 // without starting one. Like every call that asserts the user only through
 // X-Clerk-User-Id, it forwards no JWT, which may expire before a queued
 // turn starts.
+// ResearchAllowance 在不发起深度研究的情况下读取用户现在是否可以进行深度研究。与所有仅通过
+// X-Clerk-User-Id 断言用户的调用一样，它不转发 JWT，因为 JWT 可能在排队的 Turn 开始前就过期。
 func (c *Client) ResearchAllowance(ctx context.Context, clerkUserID string) (*ResearchAllowance, error) {
 	if clerkUserID == "" {
 		return nil, fmt.Errorf("controlplane: clerk user id is required")
@@ -1470,6 +1613,7 @@ func (c *Client) ResearchAllowance(ctx context.Context, clerkUserID string) (*Re
 // StartResearch counts a deep research as the user's for the hour. The
 // control plane refuses it with StatusDeepResearchLimitReached, and when the
 // limit lifts, while the user's last one started less than an hour ago.
+// StartResearch 将一次深度研究计入该用户本小时的名额。若用户上次研究开始不到一小时，control plane 会以 StatusDeepResearchLimitReached 拒绝，直到该限制解除。
 func (c *Client) StartResearch(ctx context.Context, clerkUserID string) error {
 	if clerkUserID == "" {
 		return fmt.Errorf("controlplane: clerk user id is required")
@@ -1494,9 +1638,11 @@ func (c *Client) StartResearch(ctx context.Context, clerkUserID string) error {
 
 // ChatTokenPath is where the control plane renews the chat access token of
 // a reply the harness is still writing.
+// ChatTokenPath 是 control plane 续期 harness 仍在写入的回复的 chat 访问 token 的端点。
 const ChatTokenPath = "/api/sync/chat-token"
 
 // maxChatTokenResponseBytes bounds the control plane's answer to a renewal.
+// maxChatTokenResponseBytes 限制 control plane 对续期请求的应答大小。
 const maxChatTokenResponseBytes = 32 << 10
 
 // RenewChatToken trades the chat access token a user's run holds, expired
@@ -1505,6 +1651,9 @@ const maxChatTokenResponseBytes = 32 << 10
 // plane refuses it once the user's subscription ends or their account is
 // suspended, and not for their hourly cap, which a reply already started
 // may finish past.
+// RenewChatToken 用用户 run 所持有的 chat 访问 token（无论是否过期）换取一个新 token，这样即使用户的
+// 客户端不在场签发新 token，该 run 也能活得比它启动时的 token 更久。一旦用户订阅结束或账户被暂停，
+// control plane 会拒绝它；但不会因每小时的限额而拒绝，因为已开始的回复可以在超过该限额后完成。
 func (c *Client) RenewChatToken(ctx context.Context, clerkUserID, held string) (string, error) {
 	if clerkUserID == "" {
 		return "", fmt.Errorf("controlplane: clerk user id is required")
@@ -1543,11 +1692,13 @@ func (c *Client) RenewChatToken(ctx context.Context, clerkUserID, held string) (
 }
 
 // SafeguardFlagsPath lists the chats the safeguards flagged for a user.
+// SafeguardFlagsPath 列出 safeguards 为用户标记的 chat。
 const SafeguardFlagsPath = "/api/sync/safeguard-flags"
 
 // SafeguardFlags are the ids of the user's chats the safeguards flagged.
 // It forwards no JWT, so a turn that waited in a queue is checked as one
 // that starts at once is.
+// SafeguardFlags 返回 safeguards 标记的用户 chat id。它不转发 JWT，因此排队等待的 Turn 与立即开始的 Turn 会被同样地检查。
 func (c *Client) SafeguardFlags(ctx context.Context, clerkUserID string) ([]string, error) {
 	if clerkUserID == "" {
 		return nil, fmt.Errorf("controlplane: clerk user id is required")
@@ -1567,6 +1718,7 @@ func (c *Client) SafeguardFlags(ctx context.Context, clerkUserID string) ([]stri
 	return chats, nil
 }
 
+// DeleteAttachmentIndex 删除某个附件的索引记录。
 func (c *Client) DeleteAttachmentIndex(ctx context.Context, jwt, clerkUserID, attachmentID string) error {
 	if attachmentID == "" {
 		return fmt.Errorf("controlplane: attachment id is required")
@@ -1597,6 +1749,9 @@ func (c *Client) DeleteAttachmentIndex(ctx context.Context, jwt, clerkUserID, at
 // upload don't proliferate guard rows. The companion call
 // RegisterAttachmentIndex clears the row inside the same DB
 // transaction; the sweeper drains anything that times out.
+// ReservePendingAttachmentWrite 请求 controlplane 在 enclave 向 buckets 写入字节前打一个 guard 行。
+// 对同一 id 的重复预留是无操作，因此同一上传的重试不会产生大量 guard 行。配套调用
+// RegisterAttachmentIndex 会在同一 DB 事务中清除该行；sweeper 会清空任何超时的记录。
 func (c *Client) ReservePendingAttachmentWrite(ctx context.Context, jwt, clerkUserID, attachmentID, chatID string) error {
 	return c.postAttachmentChatID(
 		ctx,
@@ -1614,6 +1769,9 @@ func (c *Client) ReservePendingAttachmentWrite(ctx context.Context, jwt, clerkUs
 // attachment id in the URL (attachment-index registration and the
 // pending-write ledger reservation). Factored out so the two paths
 // can't drift in headers, auth, or success-body handling.
+// postAttachmentChatID 是两个以附件 id 为 URL 键、携带 `{chat_id}` 请求体的附件作用域 POST（附件索引
+// 注册与 pending-write 台账预留）的共享传输层。抽离出来是为了让这两条路径在 header、认证或成功
+// 响应体处理上不会产生偏差。
 func (c *Client) postAttachmentChatID(
 	ctx context.Context,
 	jwt, clerkUserID, attachmentID, chatID, pathPrefix, opLabel string,
@@ -1655,6 +1813,8 @@ func (c *Client) postAttachmentChatID(
 // abandoned attachment id, its owner, and the chat it was meant for.
 // The enclave's sweeper uses (clerk_user_id, attachment_id) to drive
 // the buckets-side cleanup before logging the reconciliation.
+// PendingAttachmentRow 是 sweep 响应中的一条记录：被遗弃的附件 id、其所有者以及它原本所属的 chat。
+// enclave 的 sweeper 使用 (clerk_user_id, attachment_id) 来驱动 buckets 侧的清理，再记录对账结果。
 type PendingAttachmentRow struct {
 	AttachmentID string `json:"attachment_id"`
 	ChatID       string `json:"chat_id"`
@@ -1666,6 +1826,9 @@ type PendingAttachmentRow struct {
 // ledger by the same call, so the caller is the sole owner of the
 // cleanup obligation for the returned ids. Enclave-only — the route
 // is gated by the service secret on the CP side.
+// SweepPendingAttachmentWrites 从 controlplane 拉取下一批过期的 guard 行。同一调用会将这些行从
+// pending 台账中删除，因此调用者是所返回 id 清理义务的唯一承担者。仅限 enclave 使用——该路由在
+// CP 侧由服务密钥把关。
 func (c *Client) SweepPendingAttachmentWrites(ctx context.Context, limit int) ([]PendingAttachmentRow, error) {
 	if limit <= 0 {
 		limit = 200
@@ -1702,27 +1865,32 @@ func (c *Client) SweepPendingAttachmentWrites(ctx context.Context, limit int) ([
 // OrphanAttachmentRow pairs an orphaned v2 attachment id with its
 // owning user so the reaper can address the buckets object under the
 // owner's per-user tenant prefix.
+// OrphanAttachmentRow 将无主的 v2 附件 id 与其所属用户配对，使 reaper 能在所有者的每用户 tenant 前缀下寻址该 buckets 对象。
 type OrphanAttachmentRow struct {
 	AttachmentID string `json:"attachment_id"`
 	ClerkUserID  string `json:"clerk_user_id"`
 }
 
+// SearchIndexDeletion 是一条已退役的搜索索引对象记录。
 type SearchIndexDeletion struct {
 	ID          string `json:"id"`
 	ClerkUserID string `json:"clerk_user_id"`
 	ObjectKey   string `json:"object_key"`
 }
 
+// SearchIndexDeletionClaim 是一批已认领的搜索索引删除记录。
 type SearchIndexDeletionClaim struct {
 	ClaimToken string                `json:"claim_token"`
 	Deletions  []SearchIndexDeletion `json:"deletions"`
 }
 
+// 搜索索引删除记录的 claim 与 ack 端点路径。
 const (
 	ClaimSearchIndexDeletionsPath = "/api/sync/search-index-deletions/claim"
 	AckSearchIndexDeletionsPath   = "/api/sync/search-index-deletions/ack"
 )
 
+// ClaimSearchIndexDeletions 认领一批待删除的退役搜索索引对象。
 func (c *Client) ClaimSearchIndexDeletions(ctx context.Context, batchSize int) (*SearchIndexDeletionClaim, error) {
 	body, err := json.Marshal(struct {
 		BatchSize int `json:"batch_size"`
@@ -1755,6 +1923,7 @@ func (c *Client) ClaimSearchIndexDeletions(ctx context.Context, batchSize int) (
 	return &out, nil
 }
 
+// AckSearchIndexDeletions 确认删除一批已认领的搜索索引对象。
 func (c *Client) AckSearchIndexDeletions(ctx context.Context, claimToken string, ids []string) error {
 	body, err := json.Marshal(struct {
 		ClaimToken string   `json:"claim_token"`
@@ -1787,12 +1956,14 @@ func (c *Client) AckSearchIndexDeletions(ctx context.Context, claimToken string,
 	return nil
 }
 
+// AttachmentPurge 是一条待清除的附件记录。
 type AttachmentPurge struct {
 	AttachmentID string `json:"attachment_id"`
 	ClerkUserID  string `json:"clerk_user_id"`
 	ChatID       string `json:"chat_id"`
 }
 
+// AttachmentPurgeClaim 是一批已认领的附件清除记录。
 type AttachmentPurgeClaim struct {
 	ClaimToken string            `json:"claim_token"`
 	Purges     []AttachmentPurge `json:"purges"`
@@ -1801,6 +1972,8 @@ type AttachmentPurgeClaim struct {
 // postJSON is the shared shape of the small control-channel calls the
 // background workers make: JSON in, JSON (or nothing) out, controlplane
 // error envelope on 4xx/5xx.
+// postJSON 是后台 worker 发起的小型控制通道调用的通用形态：JSON 进、JSON（或空）出，4xx/5xx 时
+// 使用 controlplane 错误信封。
 func (c *Client) postJSON(ctx context.Context, path string, in any, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
@@ -1835,6 +2008,7 @@ func (c *Client) postJSON(ctx context.Context, path string, in any, out any) err
 // PurgeUnreferencedAttachments asks the controlplane to move index rows
 // that have been unreferenced past its grace window into the purge
 // queue. Returns how many were queued this call.
+// PurgeUnreferencedAttachments 请求 controlplane 将超出宽限期且不再被引用的索引行移入清除队列。返回本次调用入队的数量。
 func (c *Client) PurgeUnreferencedAttachments(ctx context.Context, batchSize int) (int, error) {
 	var out struct {
 		Queued int `json:"queued"`
@@ -1845,6 +2019,7 @@ func (c *Client) PurgeUnreferencedAttachments(ctx context.Context, batchSize int
 	return out.Queued, err
 }
 
+// ClaimAttachmentPurges 认领一批待清除的附件。
 func (c *Client) ClaimAttachmentPurges(ctx context.Context, batchSize int) (*AttachmentPurgeClaim, error) {
 	var out AttachmentPurgeClaim
 	err := c.postJSON(ctx, "/api/sync/attachment-purges/claim", struct {
@@ -1856,6 +2031,7 @@ func (c *Client) ClaimAttachmentPurges(ctx context.Context, batchSize int) (*Att
 	return &out, nil
 }
 
+// AckAttachmentPurges 确认清除一批已认领的附件。
 func (c *Client) AckAttachmentPurges(ctx context.Context, claimToken string, attachmentIDs []string) error {
 	return c.postJSON(ctx, "/api/sync/attachment-purges/ack", struct {
 		ClaimToken    string   `json:"claim_token"`
@@ -1863,6 +2039,7 @@ func (c *Client) AckAttachmentPurges(ctx context.Context, claimToken string, att
 	}{ClaimToken: claimToken, AttachmentIDs: attachmentIDs}, nil)
 }
 
+// DeleteOrphanedV2Attachments 删除一批无主的 v2 附件索引条目。
 func (c *Client) DeleteOrphanedV2Attachments(ctx context.Context, limit int) ([]OrphanAttachmentRow, error) {
 	if limit <= 0 {
 		limit = 500
@@ -1885,12 +2062,15 @@ func (c *Client) DeleteOrphanedV2Attachments(ctx context.Context, limit int) ([]
 	// empty-body "no orphans" path below — a connection that died
 	// mid-stream would otherwise look identical to a real 204 and we
 	// would skip whatever ids the controlplane was about to send.
+	// 2xx 响应上的读取错误绝不能静默落入下面空响应体“无孤儿”的路径——否则中途断开的连接会与真正的
+	// 204 看起来完全一样，从而跳过 controlplane 即将发送的任何 id。
 	if readErr != nil {
 		return nil, fmt.Errorf("controlplane: read orphan attachments: %w", readErr)
 	}
 	// 204 No Content and any other empty 2xx response means
 	// "no orphans found"; treat it as a successful zero-row sweep
 	// instead of a decode error.
+	// 204 No Content 以及其他空的 2xx 响应都表示“未发现孤儿”；将其视为一次成功的零行清理，而不是解码错误。
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, nil
 	}
@@ -1905,6 +2085,7 @@ func (c *Client) DeleteOrphanedV2Attachments(ctx context.Context, limit int) ([]
 
 // ErrAttachmentNotFound is returned by ResolveAttachmentOwner when the
 // controlplane has no index row for the requested attachment id.
+// ErrAttachmentNotFound 由 ResolveAttachmentOwner 返回，表示 controlplane 没有所请求附件 id 的索引行。
 var ErrAttachmentNotFound = errors.New("controlplane: attachment not found")
 
 // ResolveAttachmentOwner returns the clerk user id that owns the given
@@ -1913,6 +2094,9 @@ var ErrAttachmentNotFound = errors.New("controlplane: attachment not found")
 // buckets tenant prefix from a trusted source instead of the caller.
 // Enclave-only: authenticated with the service secret. A 404 surfaces
 // as ErrAttachmentNotFound so the caller can return a clean 404.
+// ResolveAttachmentOwner 返回拥有给定 v2 附件 id 的 clerk 用户 id。读取路径（/v1/attachment/get 和
+// 未认证的 /v1/attachment/get-public）用它从可信来源而非调用者推导 buckets 的 tenant 前缀。
+// 仅限 enclave 使用：通过服务密钥认证。404 会表现为 ErrAttachmentNotFound，使调用者能返回干净的 404。
 func (c *Client) ResolveAttachmentOwner(ctx context.Context, attachmentID string) (string, error) {
 	if attachmentID == "" {
 		return "", errors.New("controlplane: attachment id is required")

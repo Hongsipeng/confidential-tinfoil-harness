@@ -3,6 +3,9 @@
 // contacts a page's host. context.dev receives the page's URL, with zero data
 // retention and no shared cache; DuckDuckGo receives only its host. Nothing is
 // cached, and no URL is logged.
+// Package pages 通过 context.dev 读取链接预览所展示的网页内容，通过 DuckDuckGo 读取
+// 站点 favicon，因此 harness 绝不联系页面主机。context.dev 仅收到页面 URL（零数据
+// 保留、无共享缓存）；DuckDuckGo 仅收到其主机名。不缓存任何内容，也不记录任何 URL。
 package pages
 
 import (
@@ -28,12 +31,14 @@ const (
 )
 
 // Status of a favicon the reader found, or found the site has none of.
+// Status 是 reader 找到的 favicon 状态，或发现该站点没有 favicon 的状态。
 const (
 	FaviconFound   = "found"
 	FaviconMissing = "missing"
 )
 
 // Reader reads pages and favicons for the harness's callers.
+// Reader 为 harness 的调用方读取页面与 favicon。
 type Reader struct {
 	contextDev *contextDev
 	icons      *http.Client
@@ -41,6 +46,7 @@ type Reader struct {
 }
 
 // New reads pages with the harness's context.dev key.
+// New 使用 harness 的 context.dev key 读取页面。
 func New(apiKey string) *Reader {
 	return newReader(apiKey, duckDuckGoIcons)
 }
@@ -60,8 +66,10 @@ func newReader(apiKey, iconsURL string, contextDevOptions ...option.RequestOptio
 
 // Details is what a link preview shows of a page. A detail the page lacks
 // is nil.
+// Details 是链接预览所展示的页面信息。页面缺少的某一项为 nil。
 type Details struct {
 	// URL is where the page ended up, after its redirects.
+	// URL 是页面在经历重定向后的最终地址。
 	URL         string
 	Title       *string
 	Description *string
@@ -71,6 +79,8 @@ type Details struct {
 
 // Favicon is a site's favicon, as the harness's protocol sends it: Bytes
 // and ContentType are empty when the site has none.
+// Favicon 是站点的 favicon，按 harness 协议发送：当站点没有 favicon 时，Bytes 与
+// ContentType 为空。
 type Favicon struct {
 	Status      string `json:"status"`
 	Bytes       []byte `json:"favicon_bytes"`
@@ -82,6 +92,7 @@ func refused(err error) error {
 }
 
 // Details reads a page's details.
+// Details 读取页面的详细信息。
 func (r *Reader) Details(ctx context.Context, rawURL string) (*Details, error) {
 	target, err := NormalizeURL(rawURL)
 	if err != nil {
@@ -127,6 +138,8 @@ func present(value string) *string {
 
 // Favicon reads the favicon of a page's site. A favicon DuckDuckGo cannot
 // serve for now is refused with when to ask again.
+// Favicon 读取页面所在站点的 favicon。DuckDuckGo 暂时无法提供的 favicon 会连同
+// 重试时间一并被拒绝。
 func (r *Reader) Favicon(ctx context.Context, rawURL string) (*Favicon, error) {
 	target, err := NormalizeURL(rawURL)
 	if err != nil {

@@ -1,4 +1,5 @@
 // Package observability exports aggregate service health without caller or chat data.
+// Package observability 导出聚合的服务健康状况，不含调用方或 chat 数据。
 package observability
 
 import (
@@ -19,6 +20,7 @@ const (
 
 var durationBuckets = []float64{0.005, 0.025, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600}
 
+// Metrics 保存一组独立的 Prometheus 指标及其注册表。
 type Metrics struct {
 	registry *prometheus.Registry
 	requests *prometheus.CounterVec
@@ -29,6 +31,7 @@ type Metrics struct {
 }
 
 // New owns an independent registry. snapshot reads only aggregate run counts.
+// New 持有一个独立的注册表。snapshot 只读取聚合的 run 计数。
 func New(snapshot func() (active, queued, held int)) *Metrics {
 	m := &Metrics{
 		registry: prometheus.NewRegistry(),
@@ -52,6 +55,8 @@ func New(snapshot func() (active, queued, held int)) *Metrics {
 
 // Instrument uses the registered pattern, never a caller-supplied URL or header.
 // promhttp preserves the response writer's streaming interfaces.
+// Instrument 使用注册时的路由模式，绝不使用调用方提供的 URL 或请求头。
+// promhttp 会保留响应写入器的流式接口。
 func (m *Metrics) Instrument(pattern string, next http.HandlerFunc) http.HandlerFunc {
 	labels := prometheus.Labels{"route": pattern}
 	return promhttp.InstrumentHandlerInFlight(m.inFlight.With(labels),
@@ -60,16 +65,19 @@ func (m *Metrics) Instrument(pattern string, next http.HandlerFunc) http.Handler
 }
 
 // ServeHTTP is reached through the shim's authenticated /metrics endpoint.
+// ServeHTTP 通过 shim 的受认证 /metrics 端点访问。
 func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
 }
 
+// AdmitRun 使已接纳的 run 计数加一。
 func (m *Metrics) AdmitRun() {
 	if m != nil {
 		m.admitted.Inc()
 	}
 }
 
+// FinishRun 按结果（完成、取消或失败）记录一次 run 的耗时。
 func (m *Metrics) FinishRun(admittedAt time.Time, wasCanceled, wasFailed bool) {
 	if m == nil {
 		return

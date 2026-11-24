@@ -51,10 +51,12 @@ type chatgptAssetPointer struct {
 }
 
 // chatgptRoot is the parent ChatGPT gives a conversation's first nodes.
+// chatgptRoot 是 ChatGPT 为对话起始节点所设的父节点。
 const chatgptRoot = "client-created-root"
 
 // ReadChatGPT reads a ChatGPT conversation along its current branch, or
 // nil when it has no message to show. Images resolve through index.
+// ReadChatGPT 沿当前分支读取一条 ChatGPT 对话，无可展示消息时返回 nil。image 通过 index 解析。
 func ReadChatGPT(record json.RawMessage, index *Index) (*Conversation, error) {
 	var conv chatgptConversation
 	if err := json.Unmarshal(record, &conv); err != nil {
@@ -81,6 +83,7 @@ func ReadChatGPT(record json.RawMessage, index *Index) (*Conversation, error) {
 		}
 	} else {
 		// Without a current node, the first child of each node is followed.
+		// 没有当前节点时，沿每个节点的第一个子节点向下。
 		followed := map[string]bool{}
 		var follow func(string)
 		follow = func(nodeID string) {
@@ -119,6 +122,7 @@ func chatgptRenderable(msg *chatgptMessage) bool {
 
 // chatgptActivePath is the branch from the root to the current node, or
 // nil when the tree does not lead there.
+// chatgptActivePath 是从根到当前节点的分支，树无法到达时返回 nil。
 func chatgptActivePath(conv *chatgptConversation) []string {
 	var reversed []string
 	seen := map[string]bool{}
@@ -181,6 +185,7 @@ func chatgptMessageOf(nodeID string, conv *chatgptConversation, index *Index) (M
 
 // trimFileID strips the schemes ChatGPT names its files with, so a
 // reference can be matched against entry names.
+// trimFileID 去掉 ChatGPT 命名文件所用的 scheme，使引用能与条目名匹配。
 func trimFileID(ref string) string {
 	ref = strings.TrimSpace(ref)
 	ref = strings.TrimPrefix(ref, "file-service://")
@@ -223,6 +228,7 @@ func chatgptAttachments(msg *chatgptMessage, pointers []string, index *Index) []
 
 // chatgptThoughts is the reasoning ChatGPT recorded on the way to a reply:
 // the nearest it recorded since the user message that opened the turn.
+// chatgptThoughts 是 ChatGPT 在生成回复过程中记录的推理：即自开启该 Turn 的用户消息以来最近记录的内容。
 func chatgptThoughts(nodeID string, mapping map[string]chatgptNode) string {
 	seen := map[string]bool{}
 	for current := nodeID; current != "" && !seen[current]; {

@@ -18,6 +18,7 @@ import (
 // code blocks, images, footnotes, citation badges and bare links, keeping
 // link labels, inline code and math, in pieces of about speechTarget
 // characters that end on a sentence where they can.
+// 回复按 Web 客户端读取的方式朗读：去掉代码块、图像、脚注、引用角标和裸链接的 markdown，保留链接文字、行内代码和数学公式，切成约 speechTarget 个字符的片段，并尽量在句子结尾处断开。
 const (
 	speechTargetCharacters = 300
 	maxSpeechCharacters    = 600
@@ -35,6 +36,7 @@ var (
 )
 
 // speakableText is a reply's markdown as it is read aloud.
+// speakableText 是回复的 markdown 在朗读时所呈现的文本。
 func speakableText(source string) string {
 	data := []byte(source)
 	spoken := readable(markdown.Parse(text.NewReader(data)), data)
@@ -90,6 +92,7 @@ func plainText(value []byte) string {
 }
 
 // htmlBreak reads a line break tag as a new line and other markup as nothing.
+// htmlBreak 把换行标签读作换行，其余标记则忽略。
 func htmlBreak(tag string) string {
 	if lineBreakTag.MatchString(tag) {
 		return "\n"
@@ -100,6 +103,7 @@ func htmlBreak(tag string) string {
 // splitSpeech cuts text into pieces that take at most maxSpeechCharacters to
 // read, joining sentences until a piece reaches speechTargetCharacters and
 // cutting a longer sentence at a pause where it can.
+// splitSpeech 把文本切分成朗读时长至多 maxSpeechCharacters 的片段：不断拼接句子直到片段达到 speechTargetCharacters，更长的句子则尽量在停顿处断开。
 func splitSpeech(text string) []string {
 	pieces := []string{}
 	current := ""
@@ -139,6 +143,7 @@ func splitSpeech(text string) []string {
 // cutSpeech is where a sentence too long for one piece is cut: after the
 // most it can read in one, moved back to the last space or Chinese, Japanese
 // or Korean pause past speechTargetCharacters where there is one.
+// cutSpeech 决定一个过长而无法放入单个片段的句子在哪里断开：先取单片段能朗读的最大长度，再回退到 speechTargetCharacters 之后最近的空格或中、日、韩文的停顿处（若存在）。
 func cutSpeech(points []rune) int {
 	end, target, length := len(points), 0, 0
 	for i, r := range points {
@@ -163,6 +168,7 @@ func cutSpeech(points []rune) int {
 
 // speechLength is how long text takes to read, in characters of Latin text:
 // a Chinese, Japanese or Korean character takes about as long as two.
+// speechLength 以拉丁字符为单位估算文本的朗读时长：一个中、日、韩文字符大约相当于两个拉丁字符。
 func speechLength(points []rune) int {
 	length := len(points)
 	for _, r := range points {
@@ -177,6 +183,7 @@ func speechLength(points []rune) int {
 // the wide marks of Chinese, Japanese and Korean text, which no space
 // follows, with the closing quotes and brackets after them. A long sentence
 // of wide text is cut after one of widePauses.
+// 句子在这些标点处结束：后跟空格或位于结尾的标点，以及中、日、韩文的全角标点（其后没有空格，且可能带收尾的引号和括号）。过长的全角文本句子会在 widePauses 之一之后断开。
 const (
 	sentenceEnds     = ".!?"
 	wideSentenceEnds = "。！？"
@@ -184,6 +191,7 @@ const (
 )
 
 // sentences cuts text after each sentence's closing punctuation.
+// sentences 在每个句子的收尾标点之后切分文本。
 func sentences(text string) []string {
 	var cut []string
 	runes := []rune(text)
@@ -209,6 +217,7 @@ func sentences(text string) []string {
 }
 
 // mathNode is math between dollar signs, which is read as written.
+// mathNode 表示美元符号之间的数学公式，朗读时按原样读出。
 type mathNode struct {
 	ast.BaseInline
 }
@@ -222,6 +231,7 @@ func (n *mathNode) Dump(source []byte, level int) {
 
 // mathParser reads math as the web client's markdown reader does: a run
 // of dollar signs opens it and a run of as many closes it, across lines.
+// mathParser 按 Web 客户端 markdown 阅读器的方式解析数学公式：一串美元符号开启，等长的美元符号串结束，可跨行。
 type mathParser struct{}
 
 func (mathParser) Trigger() []byte { return []byte{'$'} }

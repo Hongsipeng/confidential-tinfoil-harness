@@ -8,6 +8,11 @@
 // to changes made under an idempotency key, which a retry gets again.
 // Tests seed its state, read it back after a call, and inject the
 // failures the control plane can answer with.
+// 包 cpstub 是 control plane 存储 API 的内存替身，模拟 harness 使用它的方式：带 revision 与元数据的密封
+// blob、带 passkey bundle 的密钥注册表、旧版附件，以及附件索引连同其维护回收的 purges、pending
+// writes 与 orphans、chat activity、待重新密封且带冷却期的行、搜索索引的发布及其退役的对象、已上报
+// 结束的导入，以及对幂等 key 下所做变更的应答（重试会再次得到同一应答）。
+// 测试会预置其状态、在调用后读回状态，并注入 control plane 可能返回的各类失败。
 package cpstub
 
 import (
@@ -34,6 +39,7 @@ import (
 
 // Blob is one stored row: its revision, the key id it was sealed under,
 // the sealed bytes, and the metadata the control plane keeps beside it.
+// Blob 是一行已存储的数据：其 revision、用于密封它的 key id、密封字节，以及 control plane 保存在其旁边的元数据。
 type Blob struct {
 	ETag         int64
 	KeyID        string
@@ -48,6 +54,7 @@ type Blob struct {
 }
 
 // ActivityBackfill is one request to record a chat's activity time.
+// ActivityBackfill 是一次记录 chat 活动时间的请求。
 type ActivityBackfill struct {
 	ID         string `json:"id"`
 	ETag       string `json:"etag"`
@@ -56,68 +63,89 @@ type ActivityBackfill struct {
 
 // Store is the stub's state. Handlers run under Mu, and a test holds it
 // while reading or changing the state once the server is up.
+// Store 是 stub 的状态。处理器在 Mu 下运行，测试在服务器启动后读取或修改状态时会持有该锁。
 type Store struct {
 	Mu sync.Mutex
 	// Blobs by "scope/id"; a profile's id is "profile".
+	// 按 "scope/id" 索引的 Blob；profile 的 id 为 "profile"。
 	Blobs map[string]*Blob
 	// The registered current key: its id, the revision a register names
 	// to replace it, how and when it was made, and the passkey bundles by
 	// key id and credential id.
+	// 已注册的当前密钥：其 id、替换它所指定的 revision、创建方式与时间，以及按 key id 和 credential id 索引的 passkey bundle。
 	CurrentKeyID      string
 	KeyETag           int64
 	KeyCreatedVia     string
 	KeyRegisteredAt   time.Time
 	Bundles           map[string]map[string]controlplane.CurrentKeyBundle
 	LegacyAttachments map[string][]byte // attachment id to ciphertext
-	GoneAttachments   map[string]bool   // attachment ids already moved to buckets
-	AttachmentIndex   map[string]string // attachment id to chat id
-	AttachmentOwners  map[string]string // attachment id to the user it was registered for
+	// LegacyAttachments 是附件 id 到密文的映射。
+	GoneAttachments map[string]bool // attachment ids already moved to buckets
+	// GoneAttachments 是已迁移到 buckets 的附件 id 集合。
+	AttachmentIndex map[string]string // attachment id to chat id
+	// AttachmentIndex 是附件 id 到 chat id 的映射。
+	AttachmentOwners map[string]string // attachment id to the user it was registered for
+	// AttachmentOwners 是附件 id 到其注册所属用户的映射。
 	// AttachmentPurges are the attachments dropped from the index whose
 	// bytes are still to be deleted, in order; a claim leases a batch of
 	// them under a token, and an ack under that token drops them.
+	// AttachmentPurges 是从索引中删除、其字节仍有待删除的附件（按顺序）；claim 会在某个 token 下租借一批，而在该 token 下的 ack 会将其移除。
 	AttachmentPurges []controlplane.AttachmentPurge
 	purgeClaims      map[string]string // attachment id to the token that claimed it
+	// purgeClaims 是附件 id 到认领它的 token 的映射。
 	// PendingAttachmentWrites are the writes the control plane releases to
 	// the next sweep, and OrphanAttachments the index entries without an
 	// owner it drops for the next, each handed over once.
+	// PendingAttachmentWrites 是 control plane 释放给下一次 sweep 的写入，OrphanAttachments 则是它为下一次删除的无主索引条目，每项只移交一次。
 	PendingAttachmentWrites []controlplane.PendingAttachmentRow
 	OrphanAttachments       []controlplane.OrphanAttachmentRow
 	// MigrationFailures counts the recorded reseal failures by "scope/id",
 	// the id as the needs-migration list names it; a row with one is in
 	// its cooldown and is not listed.
+	// MigrationFailures 按 "scope/id" 统计已记录的重新密封失败次数（id 与 needs-migration 列表中的命名一致）；有一条失败记录的行处于冷却期，不会被列出。
 	MigrationFailures map[string]int
 	// SourceRevision counts the chat writes and deletes, which the search
 	// index's publication is measured against.
+	// SourceRevision 统计 chat 的写入与删除次数，搜索索引的发布以此作为衡量基准。
 	SourceRevision int64
 	// SearchState is the search index's publication: the object that
 	// holds it, under which key and model, at which generation and fence,
 	// and through which source revision it covers. SourceRevision and the
 	// derived Incomplete are filled in as it is served.
+	// SearchState 是搜索索引的发布：持有它的对象、所使用的 key 与 model、所处的 generation 与 fence，以及它覆盖到哪个 source revision。SourceRevision 与派生出的 Incomplete 会在对外提供时填充。
 	SearchState controlplane.SearchIndexState
 	// SearchIndexDeletions are the index objects retired from publication
 	// and not yet acknowledged as deleted, by id; a claim leases a batch
 	// of them under a token, and an ack under that token drops them.
+	// SearchIndexDeletions 是已从发布中退役、但尚未确认删除的索引对象（按 id）；claim 会在某个 token 下租借一批，而在该 token 下的 ack 会将其移除。
 	SearchIndexDeletions []controlplane.SearchIndexDeletion
 	searchClaims         map[string]string // deletion id to the token that claimed it
+	// searchClaims 是删除记录 id 到认领它的 token 的映射。
 	// ImportOutcomes are the imports the enclave reported ended, in order.
+	// ImportOutcomes 是 enclave 上报已结束的导入，按顺序排列。
 	ImportOutcomes []controlplane.ImportOutcome
 	// ResearchStarts are when each user last started a deep research, by
 	// user id; the stub allows one a researchWindow, as the control plane does.
+	// ResearchStarts 按 user id 记录每个用户最近一次启动 deep research 的时间；与 control plane 一样，stub 在一个 researchWindow 内只允许一次。
 	ResearchStarts map[string]time.Time
 	// RenewChatToken answers a renewal of the chat token a user's run holds
 	// with the next token, or with the status the control plane refuses it
 	// by. Unset, every renewal is refused as not found.
+	// RenewChatToken 用下一个 token 来应答用户 run 所持有 chat token 的续期，或用 control plane 拒绝续期时的状态码来应答。未设置时，每次续期都会被当作 not found 拒绝。
 	RenewChatToken func(user, held string) (token string, refused int)
 	// answered are the changes made under an idempotency key, by the
 	// caller and the key. The control plane keeps them for a day, the
 	// stub for its life.
+	// answered 是按调用者与 key 记录的在幂等 key 下所做的变更。control plane 会保留一天，stub 则在其整个生命周期内保留。
 	answered map[string]idempotentAnswer
 	// MinimumProfileSyncProtocol refuses profile overwrites by older
 	// writers when set.
+	// MinimumProfileSyncProtocol 设置后，会拒绝旧版本 writer 对 profile 的覆盖写入。
 	MinimumProfileSyncProtocol int
 	ActivityBackfills          []ActivityBackfill
 	// Secret signs the claim on a legacy attachment, as the control plane
 	// does when it shares one with the enclave. Empty omits the claim.
+	// Secret 为旧版附件的 claim 签名，就像 control plane 与 enclave 共享附件时做的那样。为空则省略 claim。
 	Secret string
 
 	// Failure injection. A count is how many calls fail before the next
@@ -126,15 +154,18 @@ type Store struct {
 	// still being purged. A search conflict is another replica's
 	// publication landing just before the next one, which is then
 	// refused with the state that replica left.
+	// 故障注入。计数表示在下一次成功之前有多少次调用会失败；状态码列表会依次返回。reservation purge 会在某个 id 的旧副本仍在清除时拒绝该 id 的预约。search conflict 表示另一个 replica 的发布恰好落在下一次发布之前，随后以该 replica 留下的状态拒绝下一次发布。
 	BeforePutBlob    func(scope, id string)
 	BeforeDeleteBlob func(scope, id string)
 	PutBlobFailures  map[string]int
 	GetBlobFailures  map[string][]int
 	// ListStatusFailures is how many listings of each scope are answered
 	// with a server error before the stub lists the scope again.
+	// ListStatusFailures 表示每个 scope 的列表在被 stub 正常列出之前，会有多少次以服务器错误应答。
 	ListStatusFailures map[string]int
 	// NeedsMigrationFailures is the status a listing of rows to reseal
 	// answers with, by the listing's number since the stub was made.
+	// NeedsMigrationFailures 是待重新密封行列表按自 stub 创建以来的列表序号所应答的状态码。
 	NeedsMigrationFailures          map[int]int
 	needsMigrationListings          int
 	DeleteAttachmentIndexFailures   map[string]int
@@ -143,11 +174,13 @@ type Store struct {
 	ReserveAttachmentPurges         map[string]int
 	SearchConflict                  func(controlplane.SearchIndexState) controlplane.SearchIndexState
 	// CaptureHeaders sees every request before it is served, outside Mu.
+	// CaptureHeaders 会在每个请求被处理之前（在 Mu 之外）看到该请求。
 	CaptureHeaders func(r *http.Request)
 
 	mux *http.ServeMux
 }
 
+// New 返回一个已就绪的空 stub，所有路由均已注册。
 func New() *Store {
 	s := &Store{
 		Blobs:                           map[string]*Blob{},
@@ -235,10 +268,12 @@ func (s *Store) handleRenewChatToken(w http.ResponseWriter, r *http.Request) {
 
 // researchWindow is how long after a user starts a deep research the
 // control plane refuses them another.
+// researchWindow 是用户启动一次 deep research 后，control plane 拒绝其再次启动的时长。
 const researchWindow = time.Hour
 
 // researchLimit is when a user's last deep research stops refusing another,
 // and whether it still does.
+// researchLimit 返回用户上一次 deep research 何时不再拒绝下一次，以及当前是否仍在拒绝。
 func (s *Store) researchLimit(user string) (time.Time, bool) {
 	started, ok := s.ResearchStarts[user]
 	resets := started.Add(researchWindow)
@@ -265,6 +300,7 @@ func (s *Store) handleStartResearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"started_at": s.ResearchStarts[user].UTC().Format(time.RFC3339)})
 }
 
+// ServeHTTP 在持有 Mu 的情况下将请求路由到对应的处理器。
 func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.Mu.Lock()
 	capture := s.CaptureHeaders
@@ -278,9 +314,11 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Key is the Blobs key of a row.
+// Key 是一行数据在 Blobs 中的键。
 func Key(scope, id string) string { return scope + "/" + id }
 
 // SetBlob seeds a row as written now, under Mu.
+// SetBlob 在 Mu 下预置一行数据，写入时间为当前时间。
 func (s *Store) SetBlob(scope, id string, blob Blob) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -291,6 +329,7 @@ func (s *Store) SetBlob(scope, id string, blob Blob) {
 }
 
 // FormatETag is a revision as the control plane sends it.
+// FormatETag 将 revision 格式化为 control plane 发送的字符串形式。
 func FormatETag(n int64) string { return strconv.FormatInt(n, 10) }
 
 func extractID(scope string, r *http.Request) string {
@@ -315,12 +354,14 @@ func staleBlob(w http.ResponseWriter, currentETag string) {
 
 // Every write and delete names the revision it expects, as the control
 // plane requires.
+// 与 control plane 的要求一致，每次写入和删除都要声明它预期的 revision。
 func preconditionRequired(w http.ResponseWriter) {
 	writeJSON(w, http.StatusPreconditionRequired, map[string]string{"code": controlplane.StatusPreconditionRequired, "message": "If-Match is required"})
 }
 
 // idempotentAnswer is a change made under an idempotency key: the request
 // a retry must repeat, and what the control plane answered.
+// idempotentAnswer 是在幂等 key 下所做的一次变更：重试必须重复的请求，以及 control plane 当时的应答。
 type idempotentAnswer struct {
 	method, path, operationHash string
 	status                      int
@@ -333,6 +374,7 @@ type idempotentAnswer struct {
 // of a change made under the caller's key is answered as the change was
 // and not made again, another request under the key is refused, and a new
 // change is made and, once it succeeds, its answer kept.
+// idempotent 在幂等 key 下按 control plane 的方式处理一次变更：没有 operation hash 的变更会被拒绝；对调用者 key 下已完成变更的重试会按原样应答而不再执行；同一 key 下的其他请求会被拒绝；新变更会执行，一旦成功就保留其应答。
 func (s *Store) idempotent(change http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get(controlplane.HeaderIdempotency)
@@ -422,6 +464,7 @@ func (s *Store) handlePutBlob(scope string) http.HandlerFunc {
 		stored := &Blob{ETag: nextETag, KeyID: r.Header.Get(controlplane.HeaderKeyID), Body: body, UpdatedAt: time.Now().UTC()}
 		if blob != nil {
 			// A write that says nothing about the project leaves it as it is.
+			// 未提及 project 的写入会保持 project 现状不变。
 			stored.ProjectIDSet, stored.ProjectID = blob.ProjectIDSet, blob.ProjectID
 		}
 		if scope == "chat" && r.Header.Get(controlplane.HeaderProjectIDSet) == "1" {
@@ -479,6 +522,7 @@ func (s *Store) handleGetBlob(scope string) http.HandlerFunc {
 }
 
 // handleHeadBlob answers a row's revision and key id without its bytes.
+// handleHeadBlob 仅返回一行的 revision 和 key id，而不返回其字节内容。
 func (s *Store) handleHeadBlob(scope string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		blob, ok := s.Blobs[Key(scope, extractID(scope, r))]
@@ -516,6 +560,7 @@ func (s *Store) handleDeleteBlob(scope string) http.HandlerFunc {
 		delete(s.Blobs, key)
 		// A chat's delete drops its attachment index rows and names them,
 		// so the enclave can wipe the bytes in buckets.
+		// 删除 chat 时会丢弃其附件索引条目并列出它们，这样 enclave 就能清除 buckets 中的字节。
 		wiped := []string{}
 		if scope == "chat" {
 			s.SourceRevision++
@@ -533,6 +578,7 @@ func (s *Store) handleDeleteBlob(scope string) http.HandlerFunc {
 
 // handleDeleteAllProjects removes every project and project document, and
 // answers how many projects went.
+// handleDeleteAllProjects 删除所有 project 与 project document，并应答删除了多少个 project。
 func (s *Store) handleDeleteAllProjects(w http.ResponseWriter, r *http.Request) {
 	deleted := 0
 	for key := range s.Blobs {
@@ -549,6 +595,7 @@ func (s *Store) handleDeleteAllProjects(w http.ResponseWriter, r *http.Request) 
 
 // handleRewrap replaces a row's sealed bytes and key id at a revision
 // without the write counting as a change to the row.
+// handleRewrap 在某个 revision 上替换一行的密封字节和 key id，而这次写入不计为该行的变更。
 func (s *Store) handleRewrap(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Scope         string `json:"scope"`
@@ -597,6 +644,7 @@ func (s *Store) handleBackfillChatActivity(w http.ResponseWriter, r *http.Reques
 	activityAt, err := time.Parse(time.RFC3339Nano, req.ActivityAt)
 	if blob := s.Blobs[Key("chat", req.ID)]; err == nil && blob != nil && blob.ActivityAt == nil && FormatETag(blob.ETag) == req.ETag {
 		// As the control plane does, it records no time after the write.
+		// 与 control plane 一样，它不会记录写入之后的时间。
 		if activityAt.After(blob.UpdatedAt) {
 			activityAt = blob.UpdatedAt
 		}
@@ -608,6 +656,7 @@ func (s *Store) handleBackfillChatActivity(w http.ResponseWriter, r *http.Reques
 
 // listCursor is the last row a page listed, by the time it was listed by
 // and its id.
+// listCursor 是某一页所列出的最后一行，以其被列出的时间和 id 表示。
 type listCursor struct {
 	At time.Time `json:"at"`
 	ID string    `json:"id"`
@@ -618,6 +667,7 @@ type listCursor struct {
 // project. As the control plane does, a page that fills names a cursor at
 // its last row, and the next page lists the rows that sort after it as
 // they sort then.
+// handleListStatus 以 limit 为分页大小列出某个 scope 的行，默认最后写入的在前（除非要求最旧的在前）；chat 可以按 project 缩小范围。与 control plane 一样，填满的一页会以最后一行作为 cursor，下一页则列出按当时排序位于其后的行。
 func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	scope, project := query.Get("scope"), query.Get("project_id")
@@ -650,6 +700,7 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Newest activity first, as the control plane lists: a chat's
 	// activity time when it has one, else its write time, then id.
+	// 与 control plane 的列表方式一样，最近活动在前：chat 有活动时间时用活动时间，否则用写入时间，然后按 id。
 	listedAt := func(b *Blob) time.Time {
 		if b.ActivityAt != nil {
 			return *b.ActivityAt
@@ -684,12 +735,14 @@ func (s *Store) handleListStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRevisionSummary is where the chats' ledger stands.
+// handleRevisionSummary 返回 chat 账本的当前进度。
 func (s *Store) handleRevisionSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, controlplane.RevisionSummaryResponse{CurrentRevision: strconv.FormatInt(s.SourceRevision, 10)})
 }
 
 // The needs-migration list is at most maxMigrationPage ids, by id, and
 // defaultMigrationPage without a limit.
+// needs-migration 列表按 id 最多返回 maxMigrationPage 个，未指定 limit 时为 defaultMigrationPage 个。
 const (
 	maxMigrationPage     = 500
 	defaultMigrationPage = 100
@@ -699,6 +752,7 @@ const (
 // key and outside their cooldown, by id, with how many such rows remain
 // and how many are in a cooldown. The control plane files a profile under
 // its user, so it is named by the user id.
+// handleNeedsMigration 按 id 列出某个 scope 下未使用当前密钥密封且不在冷却期内的行，并说明还剩多少这样的行以及有多少行处于冷却期。control plane 会把 profile 归档到其用户之下，因此用 user id 命名。
 func (s *Store) handleNeedsMigration(w http.ResponseWriter, r *http.Request) {
 	listing := s.needsMigrationListings
 	s.needsMigrationListings++
@@ -751,9 +805,11 @@ func (s *Store) handleMigrationFailure(w http.ResponseWriter, r *http.Request) {
 
 // The search index's publication, as the control plane keeps it: one
 // object key per publication, named for the fence it was published under.
+// control plane 所保存的搜索索引发布：每次发布对应一个 object key，以发布时的 fence 命名。
 
 // searchIndexObjectKey is the shape of an index object's key: the prefix,
 // the fence it was published under, and a random suffix.
+// searchIndexObjectKey 是索引对象 key 的形态：前缀、发布时的 fence 以及一个随机后缀。
 var searchIndexObjectKey = regexp.MustCompile(`^search-index-v1-([0-9]+)-[a-f0-9]{32}$`)
 
 const (
@@ -761,6 +817,7 @@ const (
 	maxSearchIndexModelLength     = 128
 	// A claim of retired index objects is defaultSearchDeletionBatch
 	// without a batch size, and at most maxSearchDeletionBatch.
+	// 未指定 batch size 时，对退役索引对象的 claim 为 defaultSearchDeletionBatch 个，最多为 maxSearchDeletionBatch 个。
 	defaultSearchDeletionBatch = 25
 	maxSearchDeletionBatch     = 100
 )
@@ -768,6 +825,7 @@ const (
 // searchState is the publication as the control plane serves it: with the
 // source revision, and incomplete when the publication says so or covers
 // less than the source.
+// searchState 是 control plane 对外提供的发布状态：带有 source revision，且当发布自身声明不完整或覆盖范围小于 source 时为 incomplete。
 func (s *Store) searchState() controlplane.SearchIndexState {
 	state := s.SearchState
 	state.SourceRevision = s.SourceRevision
@@ -778,6 +836,7 @@ func (s *Store) searchState() controlplane.SearchIndexState {
 // fenceSearchIndex retires the published index object when the caller's
 // key changes or starts fresh: the publication and fence generations
 // advance, and nothing is published until a new object is.
+// fenceSearchIndex 在调用者的密钥变更或重新开始时退役已发布的索引对象：publication 与 fence 的 generation 前进一步，且在新对象发布之前不会发布任何内容。
 func (s *Store) fenceSearchIndex() {
 	state := s.searchState()
 	s.SearchState = controlplane.SearchIndexState{
@@ -801,6 +860,7 @@ func searchIndexConflict(w http.ResponseWriter, state controlplane.SearchIndexSt
 // covers less than the source; a publication under another key than the
 // registered one, or at another generation, is a conflict that answers
 // with the current state.
+// handlePublishSearchIndex 在发布者预期的 generation 和 fence 上发布一个索引对象，覆盖的 source revision 不早于已发布值且不晚于当前 source，若覆盖范围小于 source 则为 incomplete；使用非注册密钥或其他 generation 的发布会视为冲突，并返回当前状态。
 func (s *Store) handlePublishSearchIndex(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ExpectedGeneration    int64  `json:"expected_generation"`
@@ -864,6 +924,7 @@ func (s *Store) handlePublishSearchIndex(w http.ResponseWriter, r *http.Request)
 
 // handleClaimSearchIndexDeletions leases a batch of the retired index
 // objects not yet claimed under a fresh token.
+// handleClaimSearchIndexDeletions 在一个新 token 下租借一批尚未被认领的退役索引对象。
 func (s *Store) handleClaimSearchIndexDeletions(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BatchSize int `json:"batch_size"`
@@ -891,6 +952,7 @@ func (s *Store) handleClaimSearchIndexDeletions(w http.ResponseWriter, r *http.R
 
 // handleAckSearchIndexDeletions drops the retired objects acknowledged
 // under the token that claimed them.
+// handleAckSearchIndexDeletions 删除在认领它们的 token 下被确认的退役对象。
 func (s *Store) handleAckSearchIndexDeletions(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ClaimToken string   `json:"claim_token"`
@@ -912,10 +974,12 @@ func (s *Store) handleAckSearchIndexDeletions(w http.ResponseWriter, r *http.Req
 
 // keyTimestamp is a time as the control plane reports when a key or a
 // bundle was registered.
+// keyTimestamp 是 control plane 上报密钥或 bundle 注册时间时使用的时间格式。
 func keyTimestamp(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 // currentKeyAnswer is the control plane's answer about the current key;
 // without one it names no key and leaves out when it was made.
+// currentKeyAnswer 是 control plane 关于当前密钥的应答；没有当前密钥时不会给出 key，也不会给出其创建时间。
 type currentKeyAnswer struct {
 	KeyID      string                                   `json:"key_id"`
 	ETag       string                                   `json:"etag"`
@@ -938,6 +1002,7 @@ func (s *Store) handleCurrentKey(w http.ResponseWriter, r *http.Request) {
 
 // hasDataUnderOtherKey is whether any row is sealed under a key other
 // than claim, counting rows sealed under none when legacy is set.
+// hasDataUnderOtherKey 表示是否存在任何一行不是用 claim 指定的密钥密封的；当 legacy 为 true 时，也会把未使用任何密钥密封的行计入。
 func (s *Store) hasDataUnderOtherKey(claim string, legacy bool) bool {
 	for _, blob := range s.Blobs {
 		if blob.KeyID == "" && legacy || blob.KeyID != "" && blob.KeyID != claim {
@@ -973,6 +1038,7 @@ func isLowerHex32(s string) bool {
 // them. Over a key, If-Match must be its revision; "*" re-asserts the same
 // key and refuses another. A key change drops the bundles of the old key
 // and the cooldowns of the rows left to reseal.
+// handleRegisterKey 按 control plane 的方式注册密钥。没有密钥时，If-Match 必须为 "*"，非 recovery 或 manual 的密钥若已有数据行会被拒绝，除非它 start fresh（那样会清空数据）。已有密钥时，If-Match 必须为其 revision；"*" 会重申同一密钥并拒绝其他密钥。密钥变更会丢弃旧密钥的 bundle 以及待重新密封行的冷却期。
 func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(controlplane.HeaderIdempotency) == "" || r.Header.Get(controlplane.HeaderOperationHash) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "BAD_REQUEST", "error": "X-Idempotency-Key and X-Operation-Hash are required"})
@@ -1043,6 +1109,7 @@ func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	// over rows a fresh start wipes, is fenced off: a key registered over
 	// none fences only when it starts fresh, since no index could have
 	// been published without a key.
+	// 使用刚注册密钥密封、或建立在 start fresh 所清空的数据行之上的搜索索引会被隔离：在没有密钥之上注册密钥时，只有 start fresh 才会隔离，因为没有密钥就不可能发布过索引。
 	fenced := body.CreatedVia == "start_fresh" || s.CurrentKeyID != "" && changed
 	if changed {
 		s.KeyRegisteredAt = time.Now()
@@ -1067,6 +1134,7 @@ func (s *Store) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 
 // wipeAll drops every row and attachment, and names the attachments held
 // in buckets so the caller can drop those too.
+// wipeAll 删除所有数据行和附件，并列出保存在 buckets 中的附件，以便调用者也一并删除。
 func (s *Store) wipeAll() []string {
 	for key := range s.Blobs {
 		if strings.HasPrefix(key, "chat/") {
@@ -1098,6 +1166,7 @@ func (s *Store) addBundle(kid string, bundle *controlplane.RegisterKeyBundle) {
 // bundleKey is the key a bundle request names, once it is the current
 // one: without a key the request is not found, and with another it is
 // stale.
+// bundleKey 返回 bundle 请求所指定的密钥（前提是它为当前密钥）：没有密钥时请求为 not found，指定了其他密钥则为 stale。
 func (s *Store) bundleKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	kid := r.PathValue("kid")
 	switch {
@@ -1131,6 +1200,7 @@ func (s *Store) handleAddBundle(w http.ResponseWriter, r *http.Request) {
 
 // handleRemoveBundle drops a credential's bundle; one the key does not
 // have is already gone.
+// handleRemoveBundle 删除某个 credential 的 bundle；密钥本就没有的 bundle 视为已删除。
 func (s *Store) handleRemoveBundle(w http.ResponseWriter, r *http.Request) {
 	kid, ok := s.bundleKey(w, r)
 	if !ok {
@@ -1142,6 +1212,7 @@ func (s *Store) handleRemoveBundle(w http.ResponseWriter, r *http.Request) {
 
 // handleLegacyAttachment serves an attachment as older clients stored it,
 // with the control plane's claim on it when a secret is set.
+// handleLegacyAttachment 按旧客户端存储的方式提供附件；设置 secret 时附上 control plane 对它的 claim。
 func (s *Store) handleLegacyAttachment(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	if s.GoneAttachments[aid] {
@@ -1162,6 +1233,7 @@ func (s *Store) handleLegacyAttachment(w http.ResponseWriter, r *http.Request) {
 
 // legacyClaim signs who may move an attachment: the user, the id and a
 // digest of the bytes, as the control plane does.
+// legacyClaim 对允许移动附件的主体签名：用户、id 以及字节的摘要，与 control plane 的做法一致。
 func legacyClaim(secret, clerkUserID, aid string, ciphertext []byte) string {
 	digest := sha256.Sum256(ciphertext)
 	payload, _ := json.Marshal(struct {
@@ -1178,6 +1250,7 @@ func legacyClaim(secret, clerkUserID, aid string, ciphertext []byte) string {
 // handleRegisterAttachmentIndex records an attachment as held in buckets
 // for the user the request names, and drops the legacy bytes, so a later
 // legacy read answers not found.
+// handleRegisterAttachmentIndex 为请求所指定的用户将附件记录为保存在 buckets 中，并删除旧版字节，这样之后的旧版读取会返回 not found。
 func (s *Store) handleRegisterAttachmentIndex(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	var body struct {
@@ -1218,6 +1291,7 @@ func (s *Store) handleDeleteAttachmentIndex(w http.ResponseWriter, r *http.Reque
 }
 
 // handleAttachmentOwner names the user an indexed attachment belongs to.
+// handleAttachmentOwner 返回某个已索引附件所属的用户。
 func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	if pending := s.AttachmentOwnerFailures[aid]; len(pending) > 0 {
@@ -1235,6 +1309,7 @@ func (s *Store) handleAttachmentOwner(w http.ResponseWriter, r *http.Request) {
 
 // The pending-write ledger accepts every reservation, except of an id
 // whose earlier copy is queued for purging or being purged.
+// pending-write 账本接受所有预约，但某个 id 的旧副本已排队清除或正在清除时除外。
 func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	queued := slices.ContainsFunc(s.AttachmentPurges, func(purge controlplane.AttachmentPurge) bool { return purge.AttachmentID == aid })
@@ -1250,6 +1325,7 @@ func (s *Store) handleReservePendingAttachment(w http.ResponseWriter, r *http.Re
 
 // handleSweepPendingAttachments hands the sweep the pending writes the
 // control plane releases, up to the limit, which it then forgets.
+// handleSweepPendingAttachments 将 control plane 释放的 pending 写入（最多 limit 条）交给 sweep，之后即遗忘。
 func (s *Store) handleSweepPendingAttachments(w http.ResponseWriter, r *http.Request) {
 	limit := limitParam(r, defaultSweepLimit, maxSweepLimit)
 	rows := s.PendingAttachmentWrites[:min(limit, len(s.PendingAttachmentWrites))]
@@ -1259,6 +1335,7 @@ func (s *Store) handleSweepPendingAttachments(w http.ResponseWriter, r *http.Req
 
 // handleOrphanAttachments drops the index entries without an owner, up
 // to the limit, and names them for the sweep.
+// handleOrphanAttachments 删除无主的索引条目（最多 limit 条），并将其列出交给 sweep。
 func (s *Store) handleOrphanAttachments(w http.ResponseWriter, r *http.Request) {
 	limit := limitParam(r, defaultSweepLimit, maxSweepLimit)
 	rows := s.OrphanAttachments[:min(limit, len(s.OrphanAttachments))]
@@ -1272,6 +1349,7 @@ func (s *Store) handleOrphanAttachments(w http.ResponseWriter, r *http.Request) 
 
 // limitParam is a request's limit, within the bounds the control plane
 // gives the route.
+// limitParam 返回请求的 limit，并限制在 control plane 为该路由设定的范围内。
 func limitParam(r *http.Request, fallback, most int) int {
 	if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && limit > 0 && limit <= most {
 		return limit
@@ -1282,11 +1360,13 @@ func limitParam(r *http.Request, fallback, most int) int {
 const (
 	// A sweep of pending writes or orphans hands over defaultSweepLimit
 	// rows without a limit, and at most maxSweepLimit.
+	// 未指定 limit 时，对 pending writes 或 orphans 的 sweep 移交 defaultSweepLimit 条，最多 maxSweepLimit 条。
 	defaultSweepLimit = 500
 	maxSweepLimit     = 500
 	// A purge queues defaultPurgeBatch attachments without a batch size
 	// and at most maxPurgeBatch; a claim leases defaultPurgeClaimBatch
 	// and at most maxPurgeClaimBatch, which an ack names at most.
+	// 未指定 batch size 时，purge 会排队 defaultPurgeBatch 个附件，最多 maxPurgeBatch 个；claim 租借 defaultPurgeClaimBatch 个，最多 maxPurgeClaimBatch 个，这也是 ack 最多能指定的数量。
 	defaultPurgeBatch      = 100
 	maxPurgeBatch          = 500
 	defaultPurgeClaimBatch = 25
@@ -1294,6 +1374,7 @@ const (
 )
 
 // batchSize is a purge request's batch size, within its bounds.
+// batchSize 返回 purge 请求的 batch size，并限制在其范围内。
 func batchSize(w http.ResponseWriter, r *http.Request, fallback, most int) (int, bool) {
 	var req struct {
 		BatchSize int `json:"batch_size"`
@@ -1311,6 +1392,7 @@ func batchSize(w http.ResponseWriter, r *http.Request, fallback, most int) (int,
 // handlePurgeAttachments moves the index entries no chat names any more
 // into the purge queue, up to the batch size: those whose chat is gone,
 // and those a chat's last write left out of the attachments it names.
+// handlePurgeAttachments 将不再被任何 chat 引用的索引条目移入 purge 队列（最多 batch 条）：包括其 chat 已消失的条目，以及 chat 最近一次写入未列在其所引用附件中的条目。
 func (s *Store) handlePurgeAttachments(w http.ResponseWriter, r *http.Request) {
 	batch, ok := batchSize(w, r, defaultPurgeBatch, maxPurgeBatch)
 	if !ok {
@@ -1336,6 +1418,7 @@ func (s *Store) handlePurgeAttachments(w http.ResponseWriter, r *http.Request) {
 
 // handleClaimAttachmentPurges leases a batch of the queued purges not yet
 // claimed under a fresh token.
+// handleClaimAttachmentPurges 在一个新 token 下租借一批尚未被认领的已排队 purge。
 func (s *Store) handleClaimAttachmentPurges(w http.ResponseWriter, r *http.Request) {
 	batch, ok := batchSize(w, r, defaultPurgeClaimBatch, maxPurgeClaimBatch)
 	if !ok {
@@ -1358,6 +1441,7 @@ func (s *Store) handleClaimAttachmentPurges(w http.ResponseWriter, r *http.Reque
 // LapsePurgeLeases ends the leases on the claimed purges, as the control
 // plane does once their lease time has passed, so the next claim leases
 // them again.
+// LapsePurgeLeases 结束已认领 purge 的租约，就像 control plane 在租约到期后做的那样，这样下一次 claim 就能再次租借它们。
 func (s *Store) LapsePurgeLeases() {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -1366,6 +1450,7 @@ func (s *Store) LapsePurgeLeases() {
 
 // handleAckAttachmentPurges drops the purges acknowledged under the token
 // that claimed them.
+// handleAckAttachmentPurges 删除在认领它们的 token 下被确认的 purge。
 func (s *Store) handleAckAttachmentPurges(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ClaimToken    string   `json:"claim_token"`
@@ -1387,6 +1472,7 @@ func (s *Store) handleAckAttachmentPurges(w http.ResponseWriter, r *http.Request
 
 // handleNotifyImportOutcome records how an import ended, for the user the
 // request names, as the control plane does before emailing them.
+// handleNotifyImportOutcome 为请求所指定的用户记录一次导入的结果，正如 control plane 在给他们发邮件之前所做的那样。
 func (s *Store) handleNotifyImportOutcome(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		JobID         string `json:"jobId"`

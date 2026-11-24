@@ -31,37 +31,52 @@ import (
 // another row holds the one it maps to. An entity the account holds already
 // under the id the archive gives it, in a row the key reads, as an archive
 // this service wrote from the same account does, is skipped too.
+// cloud import 在客户端轮询期间于后台存储归档放入云端的内容：先 project，再其 document，最后是带 image 的 chat。
+// 它存储的每一行都记录其来源，并置于由来源派生的 id 下，因此再次运行同一 import 会跳过已存储的内容，
+// 并在某实体映射到的 id 已被其他行占用时为其取下一个 id。账户已在该归档给定 id 下、且该 key 可读的行中
+// 持有的实体——正如本服务从同一账户写入的归档那样——也会被跳过。
 
 const (
 	// ImportBudget bounds one import. Each entity costs a few round trips
 	// to the control plane, so an archive at the import's limits takes
 	// well over an hour; one that takes longer fails as timed out and keeps
 	// what it stored, which the import run again skips.
+	// ImportBudget 限制单次 import 的时长。每个实体会与 control plane 发生几次往返，因此处于 import
+	// 上限的归档要花远超一小时；超时的会失败，但保留已存储的内容，再次运行时会跳过。
 	ImportBudget = 2 * time.Hour
 	// ImportRetention is how long an ended import still answers for the
 	// caller, so a client polling for its end sees it.
+	// ImportRetention 是已结束的 import 仍可为调用方应答的时长，使轮询其结束的客户端能看到结果。
 	ImportRetention = 5 * time.Minute
 	// maxImportGenerations bounds the ids tried for one entity whose
 	// mapped rows other rows hold.
+	// maxImportGenerations 限制对某个映射行已被占用的实体所尝试的 id 数。
 	maxImportGenerations = 100
 	// maxImportNotes bounds the warnings, and the errors, a report keeps.
+	// maxImportNotes 限制报告中保留的 warning 与 error 数量。
 	maxImportNotes = 100
 	// importNotifyTimeout bounds telling the control plane how an import
 	// ended, which outlives the job.
+	// importNotifyTimeout 限制通知 control plane import 结果的时长，该通知比 job 更久。
 	importNotifyTimeout = 30 * time.Second
 	// The derivations of an imported row's id and of its images'
 	// identities are a stored format: the rows an earlier import stored,
 	// and the attachments under them, are named by them. A write's nonce
 	// is not stored, and is its job's own.
+	// 导入行 id 及其 image 身份的派生方式是一种存储格式：先前 import 存储的行及其下的 attachment 都由此命名。
+	// 写入的 nonce 不会被存储，而是属于其 job 自身。
 	importIDInfo    = "tinfoil-restore-id-v1"
 	importWriteInfo = "tinfoil-restore-write-v1"
 	importImageInfo = "import-att"
 	// An imported row's id is a UUID-shaped slice of a digest.
+	// 导入行的 id 是摘要的 UUID 形状切片。
 	importIDHexLen = 32
 	// importNonceBytes is the length of a write's nonce before hex.
+	// importNonceBytes 是写入 nonce 在十六进制编码前的字节长度。
 	importNonceBytes = 16
 	// Why an import ended before it was done, as the control plane's
 	// email and the client name it.
+	// import 提前结束的原因，与 control plane 邮件及客户端的命名一致。
 	importFailureTimeout       = "timeout"
 	importFailureAuthorization = "authorization_failed"
 	importFailureWorker        = "worker_failed"
@@ -74,10 +89,12 @@ var (
 )
 
 // importStates are a job's states as a client reads them.
+// importStates 是客户端读到的 job 状态。
 var importStates = map[jobs.State]string{jobs.Running: "running", jobs.Complete: "completed", jobs.Failed: "failed"}
 
 // importFailureMessages say in the report why an import ended early; the
 // control plane's email carries the longer explanation.
+// importFailureMessages 在报告中说明 import 提前结束的原因；更长的解释由 control plane 的邮件给出。
 var importFailureMessages = map[string]string{
 	importFailureTimeout:       "import timed out",
 	importFailureAuthorization: "Tinfoil could not authorize access to cloud storage for the import; please retry from a signed-in device",
@@ -88,6 +105,7 @@ var importFailureMessages = map[string]string{
 // ImportKindCounts is what an import did with one kind of entity: stored,
 // found stored by an earlier run, failed, or blocked by its project's
 // failure.
+// ImportKindCounts 是 import 对某一类实体的处理结果：已存储、发现先前运行已存储、失败，或因所属 project 失败而被阻塞。
 type ImportKindCounts struct {
 	Imported int `json:"imported"`
 	Skipped  int `json:"skipped"`
@@ -96,6 +114,7 @@ type ImportKindCounts struct {
 }
 
 // ImportReport is where a cloud import stands, as the client polls it.
+// ImportReport 是客户端轮询到的 cloud import 当前状态。
 type ImportReport struct {
 	Phase         string                      `json:"phase,omitempty"`
 	Imported      int                         `json:"imported"`
@@ -108,12 +127,14 @@ type ImportReport struct {
 }
 
 // importStatusView is an import job as its client polls it.
+// importStatusView 是客户端轮询到的 import job。
 type importStatusView struct {
 	JobID  string `json:"jobId"`
 	Status string `json:"status"`
 	ImportReport
 }
 
+// ImportStatus 返回调用方某个 import job 的当前状态。
 func (ar *Service) ImportStatus(_ context.Context, p *auth.Principal, _ auth.ContentKey, in *importStatusRequest) (any, error) {
 	job := ar.Imports.Get(p.ID)
 	if job == nil || job.ID() != in.JobID {
@@ -126,6 +147,7 @@ func (ar *Service) ImportStatus(_ context.Context, p *auth.Principal, _ auth.Con
 // startImport runs the job that stores a finished cloud archive, which the
 // job owns from here, and is the job's id. A caller has one import at a
 // time; one that ended gives way to the next.
+// startImport 启动存储已生成 cloud 归档的 job，该 job 从此拥有此归档，并返回 job 的 id。每个调用者同时只能有一个 import；已结束的会让位给下一个。
 func (ar *Service) startImport(ctx context.Context, p *auth.Principal, key auth.ContentKey, archive *scratchFile, source string) (string, error) {
 	defer clear(key[:])
 	// The job outlives the request, so it takes copies of the key and of
@@ -144,6 +166,7 @@ func (ar *Service) startImport(ctx context.Context, p *auth.Principal, key auth.
 
 // cloudImport is one import's job: who it is for, under which key, the
 // archive it reads, and the report it keeps up to date.
+// cloudImport 是一次 import 的 job：服务对象、所用 key、读取的归档，以及它保持更新的报告。
 type cloudImport struct {
 	ar     *Service
 	p      *auth.Principal
@@ -152,6 +175,7 @@ type cloudImport struct {
 	source string
 	// named carries the job's id, known once it has started, which the
 	// control plane is told at the end.
+	// named 承载 job 的 id，它在 job 启动后才可知，最后会告知 control plane。
 	named chan string
 	id    string
 
@@ -160,6 +184,7 @@ type cloudImport struct {
 	publish func(ImportReport)
 	// held is the ids of each scope's rows the account held as the import
 	// began storing that scope.
+	// held 是在 import 开始存储某 scope 时，账户在该 scope 下已持有的行的 id。
 	held map[string]map[string]bool
 }
 
@@ -197,6 +222,8 @@ func (j *cloudImport) run(ctx context.Context, report func(ImportReport)) (out I
 // can name theirs. An entity's failure counts against it alone, except
 // one that every later entity would meet too: the job's time running
 // out, or the caller's credential refused.
+// store 存储每个实体，先 project，使 document 和 chat 能引用其所属 project。单个实体的失败只计到它自己，
+// 但每个后续实体都会遇到的失败除外：job 运行超时，或调用方凭证被拒。
 func (j *cloudImport) store(ctx context.Context, entities []cloudEntity) error {
 	j.report.Total = len(entities)
 	j.report.Counts = map[string]ImportKindCounts{"project": {}, "document": {}, "chat": {}}
@@ -293,6 +320,7 @@ func (j *cloudImport) store(ctx context.Context, entities []cloudEntity) error {
 
 // restored is what became of one entity: stored now, or found stored by
 // an earlier run of the same import or held already by the account.
+// restored 是某个实体的最终去向：现在存储，或发现已被同一次 import 的先前运行存储，或账户早已持有。
 type restored int
 
 const (
@@ -303,6 +331,7 @@ const (
 // occupant is what holds the row an entity maps to: nothing, the entity
 // itself as an earlier run of the import stored it, another row the key
 // reads, or a row sealed under another key.
+// occupant 是占用实体所映射行的对象：无、先前运行存储的该实体本身、该 key 可读的其他行，或另一 key 封存的行。
 type occupant int
 
 const (
@@ -320,12 +349,18 @@ const (
 // id, and names the attachments it stored for it, which are retired when
 // the row is not stored after all. A write whose answer was lost is
 // settled by reading the row back.
+// restore 将实体存储到其行空闲的第一个 id 下，返回该 id（document 行的项目前缀除外）。账户在实体自身 id 下
+// 持有且该 key 可读的行，或同一次 import 之前已存储的，会直接找到而非重复存储；被其他行占用的则跳过。
+// build 为某 id 构造行，并列出为其存储的 attachment；若行最终未存储，这些 attachment 会被回收。
+// 应答丢失的写入通过读回该行来解决。
 func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID string, build func(id string, origin *domain.ImportOrigin) (*domain.StoredRow, []string, error)) (string, restored, error) {
 	scope := rowScope(entity.Kind)
 	// A document's id in an archive names its project's, so the account
 	// holds it only where its project kept that id. A row sealed under
 	// another key holds nothing the import can stand on, and the archive
 	// may hold the only copy the key reads.
+	// 归档中 document 的 id 会带上其 project 的 id，因此账户仅在其 project 保留该 id 的位置持有它。
+	// 在另一 key 下封存的行不含 import 可依赖的内容，而归档可能持有该 key 可读的唯一副本。
 	if j.held[scope][entity.SourceID] && (entity.Kind != "document" || projectID == entity.ProjectSourceID) {
 		switch holder, err := j.inspect(ctx, scope, entity.SourceID, nil); {
 		case err != nil:
@@ -382,6 +417,7 @@ func (j *cloudImport) restore(ctx context.Context, entity cloudEntity, projectID
 // inspect is what holds a row, which is the entity of origin, when given,
 // as an earlier run stored it. One that cannot be read in time is not
 // known either way.
+// inspect 返回占用某行的对象；给定 origin 时，若与先前运行所存的一致，则为该实体本身。无法及时读取的则无从判断。
 func (j *cloudImport) inspect(ctx context.Context, scope, id string, origin *domain.ImportOrigin) (occupant, error) {
 	row, err := j.ar.Store.Rows.Load(ctx, j.p, j.key, scope, id)
 	if err != nil {
@@ -402,6 +438,7 @@ func (j *cloudImport) inspect(ctx context.Context, scope, id string, origin *dom
 // hold lists the ids of the rows the account holds where an archive's
 // entities of a kind are stored, when it has any. An import that cannot
 // learn them ends, rather than store rows that might copy them.
+// hold 列出账户在归档某类实体存储处所持有行的 id（若有）。无法得知时会终止 import，而不是存储可能复制它们的行。
 func (j *cloudImport) hold(ctx context.Context, entities []cloudEntity, kind string) error {
 	if !slices.ContainsFunc(entities, func(entity cloudEntity) bool { return entity.Kind == kind }) {
 		return nil
@@ -426,6 +463,7 @@ func (j *cloudImport) hold(ctx context.Context, entities []cloudEntity, kind str
 }
 
 // rowScope is the scope an entity of a kind is stored in.
+// rowScope 是某类实体存储所在的 scope。
 func rowScope(kind string) string {
 	if kind == "document" {
 		return "project_document"
@@ -434,10 +472,12 @@ func rowScope(kind string) string {
 }
 
 // conflicted is whether a create met a row already at its id.
+// conflicted 判断创建时是否遇到该 id 下已存在的行。
 func conflicted(err error) bool { return api.AsError(err).Code == "REVISION_CONFLICT" }
 
 // importedID is the id an entity is stored under: a UUID-shaped digest of
 // who imports it, the import's source, the entity and which copy this is.
+// importedID 是实体存储所用的 id：由导入者、import 来源、实体及第几个副本构成的 UUID 形状摘要。
 func importedID(user, source, kind, sourceID string, generation int) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%s\x00%s\x00%s\x00%d", importIDInfo, user, source, kind, sourceID, generation))
 	h := hex.EncodeToString(sum[:])[:importIDHexLen]
@@ -449,6 +489,8 @@ func importedID(user, source, kind, sourceID string, generation int) string {
 // outcome it first gave, so a retry of the write within the job is
 // settled, and a later job's write of a row deleted since is made rather
 // than answered with the deleted row's outcome.
+// importedNonce 是实体写入携带的 nonce，属于其 job 自身。control plane 对见过的 nonce 返回它最初给出的结果，
+// 因此在同一 job 内重试写入可被确定，而之后 job 对被删除行的写入会真正执行，而非返回已删除行的结果。
 func importedNonce(jobID, kind, sourceID string, generation int) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%s\x00%s\x00%d", importWriteInfo, jobID, kind, sourceID, generation))
 	return hex.EncodeToString(sum[:importNonceBytes])
@@ -457,6 +499,7 @@ func importedNonce(jobID, kind, sourceID string, generation int) string {
 // importedImage names an image upload for the attachment store, which
 // derives the attachment's id and key from it: the chat, the blob and
 // which upload of the chat's this is.
+// importedImage 为 attachment 存储命名一次 image 上传，存储据此派生 attachment 的 id 与 key：包括 chat、blob 及这是该 chat 的第几次上传。
 func importedImage(chatID, blobPath string, index int) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s:%s:%s:%d", importImageInfo, chatID, blobPath, index))
 	return hex.EncodeToString(sum[:importNonceBytes])
@@ -466,6 +509,8 @@ func importedImage(chatID, blobPath string, index int) string {
 // as attachments of the chat, under keys the chat embeds, each with the
 // thumbnail an upload makes unless it came with one, and documents
 // without any content left out. It names the attachments stored.
+// chat 返回 import 要存储的、已准备好的 thread：其 image 作为 chat 的 attachment 存储，置于 chat 内嵌的 key 下，
+// 每张都带上传生成的 thumbnail（除非本就有），且不含无内容的 document。返回值为已存储 attachment 的 id。
 func (j *cloudImport) chat(ctx context.Context, id, projectID string, origin *domain.ImportOrigin, chat *cloudChat) (*domain.Thread, []string) {
 	t := chat.Thread
 	t.ID, t.ImportedFrom, t.RecordVersion, t.ProjectID = id, origin, domain.RecordVersion, nil
@@ -519,6 +564,7 @@ func (j *cloudImport) chat(ctx context.Context, id, projectID string, origin *do
 
 // documentHasContent is whether a document attachment holds any text, or
 // a page with text or an image.
+// documentHasContent 判断 document attachment 是否持有文本，或有文本或 image 的 page。
 func documentHasContent(a *domain.Attachment) bool {
 	if strings.TrimSpace(a.TextContent) != "" {
 		return true
@@ -532,6 +578,7 @@ func documentHasContent(a *domain.Attachment) bool {
 }
 
 // entity reads one of the archive's JSON entries.
+// entity 读取归档的一个 JSON 条目。
 func (j *cloudImport) entity(name string, v any) error {
 	f := j.entries[name]
 	if f == nil {
@@ -545,6 +592,7 @@ func (j *cloudImport) entity(name string, v any) error {
 }
 
 // blob reads one of the archive's image entries.
+// blob 读取归档的一个 image 条目。
 func (j *cloudImport) blob(name string) ([]byte, error) {
 	f := j.entries[name]
 	if f == nil {
@@ -556,6 +604,7 @@ func (j *cloudImport) blob(name string) ([]byte, error) {
 // count records what became of an entity and publishes the report. It is
 // the failure that ends the import when the entity's is one every later
 // entity would meet too.
+// count 记录某实体的去向并发布报告。当该实体的失败是每个后续实体都会遇到的失败时，它将终结 import。
 func (j *cloudImport) count(ctx context.Context, kind string, outcome restored, err error) error {
 	counts := j.report.Counts[kind]
 	switch {
@@ -582,6 +631,7 @@ func (j *cloudImport) count(ctx context.Context, kind string, outcome restored, 
 }
 
 // block records an entity whose project was not stored.
+// block 记录一个因所属 project 未被存储而被阻塞的实体。
 func (j *cloudImport) block(kind string) {
 	counts := j.report.Counts[kind]
 	counts.Blocked++
@@ -600,6 +650,7 @@ func (j *cloudImport) warn(text string) {
 }
 
 // note keeps text in a report's list, up to the list's bound.
+// note 将文本保留在报告的列表中，最多到列表上限。
 func (j *cloudImport) note(list *[]string, text string) {
 	if len(*list) < maxImportNotes {
 		*list = append(*list, text)
@@ -608,6 +659,7 @@ func (j *cloudImport) note(list *[]string, text string) {
 
 // fail records why the import ends before it is done, and is the error
 // that ends it.
+// fail 记录 import 提前结束的原因，并返回终结它的错误。
 func (j *cloudImport) fail(reason string, err error) error {
 	j.report.FailureReason = reason
 	return err
@@ -615,6 +667,7 @@ func (j *cloudImport) fail(reason string, err error) error {
 
 // progress publishes the report as it stands, with the totals brought up
 // to date.
+// progress 发布当前报告，并更新总数。
 func (j *cloudImport) progress() {
 	j.report.Imported, j.report.Failed = 0, 0
 	for _, counts := range j.report.Counts {
@@ -625,6 +678,7 @@ func (j *cloudImport) progress() {
 }
 
 // snapshot is a copy of the report that later changes leave as it is.
+// snapshot 是报告的一份副本，之后的修改不会影响它。
 func (j *cloudImport) snapshot() ImportReport {
 	out := j.report
 	out.Counts, out.Warnings, out.Errors = maps.Clone(j.report.Counts), slices.Clone(j.report.Warnings), slices.Clone(j.report.Errors)
@@ -633,6 +687,7 @@ func (j *cloudImport) snapshot() ImportReport {
 
 // tell has the control plane tell the user how the import ended. The
 // report already says, so a notification that fails is let go.
+// tell 让 control plane 告知用户 import 的结束情况。报告已说明，因此失败的通知会被忽略。
 func (j *cloudImport) tell(ctx context.Context, err error) {
 	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), importNotifyTimeout)
 	defer cancel()

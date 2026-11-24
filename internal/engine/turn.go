@@ -8,6 +8,7 @@ import (
 	"github.com/tinfoilsh/confidential-tinfoil-harness/internal/domain"
 )
 
+// HandleTurn 是受理一个 turn 的 HTTP 处理器：它解析请求、接纳该 turn，并流式返回其 run。
 func (eng *Engine) HandleTurn(w http.ResponseWriter, r *http.Request) {
 	p, err := eng.Auth.Authenticate(r, true)
 	if err != nil {

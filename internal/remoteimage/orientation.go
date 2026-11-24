@@ -38,6 +38,8 @@ const (
 
 // jpegOrientation reads only IFD0's inline orientation value. Every TIFF offset
 // is bounded by its APP1 segment; other directories and metadata are not read.
+// jpegOrientation 只读取 IFD0 的内联方向值。每个 TIFF 偏移都被约束在其 APP1 段内；
+// 不读取其他目录与元数据。
 func jpegOrientation(data []byte) uint16 {
 	if !bytes.HasPrefix(data, []byte{jpegMarkerPrefix, jpegSOI}) {
 		return 0

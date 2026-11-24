@@ -13,9 +13,11 @@ import (
 type jsonEndpoint func(context.Context, *auth.Principal, auth.ContentKey, json.RawMessage) (any, error)
 
 // validated is a request that checks itself once decoded.
+// validated 是解码后能自我校验的请求。
 type validated interface{ Validate() error }
 
 // decoded is a route whose handler takes its request decoded and checked.
+// decoded 表示 handler 接收已解码并校验过的请求的路由。
 func decoded[T any](handle func(context.Context, *auth.Principal, auth.ContentKey, *T) (any, error)) jsonEndpoint {
 	return func(ctx context.Context, p *auth.Principal, key auth.ContentKey, body json.RawMessage) (any, error) {
 		defer clear(key[:])
@@ -66,9 +68,11 @@ func (h *harness) routes() http.Handler {
 
 // contractCheck, set only by the tests, checks every request and response
 // against the published protocol.
+// contractCheck 仅由测试设置，用于对照已发布的协议校验每个请求和响应。
 var contractCheck func(http.Handler) http.Handler
 
 // handlers are every route the harness serves, by method and path.
+// handlers 按方法和路径返回 harness 提供的所有路由。
 func (h *harness) handlers() map[string]http.HandlerFunc {
 	handlers := map[string]http.HandlerFunc{
 		"POST " + remoteImagePath:            boundedHandler(imageResponseSlots, h.jsonRoute(routeSpec{remoteImagePath, true, false, decoded(h.attachments.Image)})),
@@ -109,6 +113,7 @@ func (h *harness) handlers() map[string]http.HandlerFunc {
 
 // jsonRoute serves a route whose request is one JSON object, after it knows
 // the caller.
+// jsonRoute 在确认调用者身份后，为请求体是单个 JSON 对象的路由提供服务。
 func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.auth.Caller(r, spec.public)
@@ -146,6 +151,7 @@ func (h *harness) jsonRoute(spec routeSpec) http.HandlerFunc {
 // threadOperation serves a route that changes a stored chat, named by id
 // with the content key, or a device chat, which its client sends as a turn
 // sends it, and which needs no account.
+// threadOperation 为修改存储聊天（通过 id 和 content key 定位）或设备聊天（由客户端以发送 turn 的方式提供，无需账户）的路由提供服务。
 func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.auth.Caller(r, true)
@@ -189,6 +195,7 @@ func (h *harness) threadOperation(handler jsonEndpoint) http.HandlerFunc {
 // runOperation serves a route about a run already started, whose caller
 // RunCaller knows. The route checks the content key its body names against
 // the run's.
+// runOperation 为与已启动 run 相关的路由提供服务，其调用者由 RunCaller 识别。该路由会把请求体中指定的 content key 与该 run 的 key 进行核对。
 func (h *harness) runOperation(handler jsonEndpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, err := h.auth.RunCaller(r)

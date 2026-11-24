@@ -10,10 +10,13 @@ import (
 
 // Change tokens tell a client whether what it stores changed, from the
 // control plane's ledger alone, without opening any row.
+// 变更 token 仅凭 control plane 的账本（无需打开任何 row）即可告诉客户端其所存储的内容是否发生了变化。
 
 // changeLedger is what a client's change token for a scope is a digest
 // of: the edge of the scope's ledger, as listed. A token a client holds
 // stays valid only while this shape does.
+// changeLedger 是客户端针对某 scope 的变更 token 所摘要的内容：即该 scope 账本的边界（按列表所示）。
+// 客户端持有的 token 仅在此结构保持不变时才有效。
 type changeLedger struct {
 	Updates []ledgerUpdate `json:"updates"`
 	Deletes []ledgerDelete `json:"deletes"`
@@ -33,6 +36,8 @@ type ledgerDelete struct {
 // StorageChanges is a token per kind of row: the chats' revision, and a
 // digest of the ledger's edge for the profile and for projects and their
 // documents.
+// StorageChanges 为每种 row 返回一个 token：chats 的修订版本，以及 profile、projects
+// 及其文档的账本边界摘要。
 func (s *Store) StorageChanges(ctx context.Context, p *auth.Principal) (any, error) {
 	summary, err := s.Controlplane.RevisionSummary(ctx, string(p.JWT), p.ID)
 	if err != nil {

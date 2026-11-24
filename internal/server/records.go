@@ -44,6 +44,7 @@ func (h *harness) changes(ctx context.Context, p *auth.Principal, _ auth.Content
 }
 
 // threadOperations change a stored chat or a device chat in one way each.
+// threadOperations 中的每个操作以一种方式修改一个存储聊天或设备聊天。
 func (h *harness) threadOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/update": decoded(h.updateThread), "/v1/threads/fork": decoded(h.forkThread),
 		"/v1/threads/messages/delete": decoded(h.deleteMessage), "/v1/threads/messages/update": decoded(h.updateMessage),
@@ -52,6 +53,7 @@ func (h *harness) threadOperations() map[string]jsonEndpoint {
 }
 
 // runOperations act on a live run or a turn queued behind one.
+// runOperations 作用于正在进行的 run，或排在其后等待的 turn。
 func (h *harness) runOperations() map[string]jsonEndpoint {
 	return map[string]jsonEndpoint{"/v1/threads/cancel": decoded(h.engine.CancelThread),
 		"/v1/threads/browser/result": decoded(h.engine.SubmitBrowserResult),
@@ -63,6 +65,8 @@ func (h *harness) session(ctx context.Context, p *auth.Principal, _ auth.Content
 	credential, err := h.auth.Inference(ctx, p)
 	// A signed-in client opens the app before or without chat access, as at
 	// its hourly cap, which it learned of when it asked for that access.
+	// 已登录客户端可能在没有或尚未获得聊天访问权限时打开应用，例如达到每小时配额上限时——
+	// 这一信息是它在请求该访问权限时获知的。
 	if err != nil && p.Anonymous {
 		return nil, err
 	}
@@ -193,6 +197,7 @@ func (h *harness) updateThread(ctx context.Context, p *auth.Principal, key auth.
 
 // pinnedThreads are the favorites pins names, in its order. One the listed
 // page holds is not opened again.
+// pinnedThreads 按收藏夹中的顺序返回置顶的聊天；当前列表页已包含的聊天不会再次打开。
 func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, pins []string, listed []domain.ThreadSummary, flags auth.ChatFlags) ([]domain.ThreadSummary, error) {
 	byID := make(map[string]domain.ThreadSummary, len(pins))
 	for _, summary := range listed {
@@ -227,12 +232,14 @@ func (h *harness) pinnedThreads(ctx context.Context, p *auth.Principal, key auth
 // committing is the context a change to a stored chat is saved under. Its
 // client leaving before the answer, as a page reloaded right after a rename
 // does, does not end it; the commit timeout a turn's start has does.
+// committing 是保存存储聊天变更所用的上下文。客户端在收到回复前离开（例如重命名后立即刷新页面）并不会中断它；真正结束它的是 turn 开始时设定的提交超时。
 func committing(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), engine.CommitTimeout)
 }
 
 // changeThread applies change to a chat: a stored one as read now, saved
 // once changed, or the device chat its client sent.
+// changeThread 将 change 应用于一个聊天：即时读取的存储聊天（修改后保存），或客户端发送的设备聊天。
 func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource, id string, change func(*domain.Thread) error) (*domain.ThreadRow, error) {
 	if !source.Local {
 		return h.store.MutateThread(ctx, p, key, id, change)
@@ -251,6 +258,7 @@ func (h *harness) changeThread(ctx context.Context, p *auth.Principal, key auth.
 
 // sourceProfile is the settings a chat's prompt reads: the stored profile,
 // or the one a device chat's client sends.
+// sourceProfile 是聊天 prompt 所读取的设置：存储的 profile，或设备聊天客户端发送的 profile。
 func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth.ContentKey, source domain.ThreadSource) (domain.Profile, error) {
 	if !source.Local {
 		return h.store.Profile(ctx, p, key)
@@ -260,6 +268,7 @@ func (h *harness) sourceProfile(ctx context.Context, p *auth.Principal, key auth
 
 // deviceReply answers an operation on a device chat with the chat its client
 // stores, which leaves out the images the client holds.
+// deviceReply 用客户端所存储的聊天来回应对设备聊天的操作，其中不包含客户端持有的图片。
 func deviceReply(row *domain.ThreadRow) any {
 	return struct {
 		Thread domain.Thread `json:"thread"`
@@ -269,6 +278,7 @@ func deviceReply(row *domain.ThreadRow) any {
 func (h *harness) deleteThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *api.DeleteRequest) (any, error) {
 	// A device chat is deleted by its client; the harness drops what it
 	// runs and keeps of it.
+	// 设备聊天由其客户端删除；harness 会丢弃它运行中和保留的相关内容。
 	if in.Local {
 		h.engine.StopDeviceThread(p, in.ID)
 		return struct{}{}, nil
@@ -298,6 +308,7 @@ func forkTitle(title string) string {
 
 // forkedCount is how many leading messages of a chat a fork through the
 // given one copies.
+// forkedCount 返回从聊天开头到指定消息为止，fork 复制的消息数量。
 func forkedCount(t *domain.Thread, messageID string) (int, error) {
 	count := 1 + t.MessageIndex(messageID)
 	if count == 0 {
@@ -308,6 +319,7 @@ func forkedCount(t *domain.Thread, messageID string) (int, error) {
 
 // startFork leaves out of a fork what belongs to the chat it was copied
 // from. Its title is the one it was given.
+// startFork 从 fork 中清除属于源聊天的状态，其标题保留为它被赋予的那个。
 func startFork(t *domain.Thread) {
 	t.ActiveRun, t.ContextUsage, t.Pinned, t.Flagged, t.TitleState = nil, nil, false, false, "manual"
 	t.LastRequestID, t.LastRequestKind, t.ImportedFrom = "", "", nil
@@ -316,6 +328,7 @@ func startFork(t *domain.Thread) {
 // forkThread starts a new chat from a chat's messages through the given one,
 // under an id the harness makes. A stored chat's fork is stored with its
 // own copies of the attachments; a device chat's fork keeps their ids.
+// forkThread 从某聊天开头到指定消息为止的内容创建新聊天，id 由 harness 生成。存储聊天的 fork 会连同附件的独立副本一起保存；设备聊天的 fork 仅保留附件的 id。
 func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	var source domain.Thread
 	if in.Local {
@@ -343,6 +356,7 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 	// The fork's attachments are copied under it, so deleting either chat
 	// takes only its own. Older rows did not record where their blobs
 	// live, which is under the chat itself.
+	// fork 的附件被复制到其名下，因此删除任一聊天只会删掉自己的附件。旧行没有记录其 blob 的存放位置——它们位于聊天自身之下。
 	fork.EachAttachment(func(a *domain.Attachment) error {
 		if a.StorageKey() != "" && a.StorageThreadID == "" {
 			a.StorageThreadID = source.ID
@@ -361,17 +375,20 @@ func (h *harness) forkThread(ctx context.Context, p *auth.Principal, key auth.Co
 }
 
 // Message actions change a chat's transcript.
+// 消息类操作修改聊天的 transcript。
 func (h *harness) deleteMessage(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *messageRequest) (any, error) {
 	return h.changeMessages(ctx, p, key, in, func(t *domain.Thread, index int) error {
 		if t.Messages[index].Role == domain.CompactionRole {
 			return api.Err(400, "BAD_REQUEST", "A compaction marker is not deleted")
 		}
 		// As on the web client, a chat keeps its last message.
+		// 与 web 客户端一致，聊天会保留最后一条消息。
 		if t.MessageCount() == 1 {
 			return api.Err(400, "BAD_REQUEST", "A chat keeps its last message")
 		}
 		t.Messages = slices.Delete(t.Messages, index, index+1)
 		// A summary of the deleted message must not keep what it said.
+		// 被删除消息的摘要不得保留其内容。
 		t.DropCompactionsAfter(index - 1)
 		return nil
 	})
@@ -419,6 +436,7 @@ func (h *harness) changeMessages(ctx context.Context, p *auth.Principal, key aut
 func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key auth.ContentKey, in *deleteAllRequest) (any, error) {
 	if in.Local {
 		// Device chats are in no project.
+		// 设备聊天不属于任何 project。
 		if in.ProjectID != nil {
 			return nil, api.Err(400, "BAD_REQUEST", "Device chats are in no project")
 		}
@@ -426,6 +444,7 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 	}
 	// Every id is listed before any is deleted, so a shrinking list cannot
 	// skip a page, and rows this key cannot open are deleted too.
+	// 先列出所有 id 再逐个删除，这样即使列表不断缩短也不会跳过某一页，而且该 key 无法打开的行也会一并删除。
 	ids, err := h.store.ChatIDs(ctx, p, domain.ValueOr(in.ProjectID, ""))
 	if err != nil {
 		return nil, err
@@ -439,11 +458,13 @@ func (h *harness) deleteAllThreads(ctx context.Context, p *auth.Principal, key a
 }
 
 // deletedCount answers a bulk deletion.
+// deletedCount 是批量删除的响应体。
 type deletedCount struct {
 	Deleted int `json:"deleted"`
 }
 
 // viewProfile is a stored profile as its client reads it.
+// viewProfile 是客户端读取到的存储 profile。
 func (h *harness) viewProfile(stored domain.StoredProfile) domain.ProfileView {
 	return domain.ProfileView{Profile: h.models.Catalog.Get().EffectiveProfile(stored.Profile), UpdatedAt: stored.UpdatedAt}
 }
@@ -456,6 +477,7 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 		// Clients read the profile to learn their key opens the account.
 		// With none stored the read opened nothing, so a key replaced on
 		// another device would pass and fail every write after.
+		// 客户端读取 profile 以确认其 key 能打开该账户。若没有存储的 profile，这次读取就没有打开任何内容，因此在另一设备上更换过的 key 会通过读取、却在之后的每次写入时失败。
 		if err := h.store.CheckKeyNotReplaced(ctx, p, key); err != nil {
 			return nil, err
 		}
@@ -466,6 +488,7 @@ func (h *harness) getProfile(ctx context.Context, p *auth.Principal, key auth.Co
 
 // upgradeDeviceProfile reads the settings a client keeps on its device as
 // the profile a stored one reads as. It stores nothing.
+// upgradeDeviceProfile 将客户端保存在设备上的设置读取为存储 profile 所读取的形式。它不存储任何内容。
 func (h *harness) upgradeDeviceProfile(_ context.Context, _ *auth.Principal, _ auth.ContentKey, in *profileUpgradeRequest) (any, error) {
 	return struct {
 		Profile domain.Profile `json:"profile"`
@@ -593,6 +616,7 @@ func (h *harness) searchThreads(ctx context.Context, p *auth.Principal, key auth
 }
 
 // markFlagged marks the chats among threads that the safeguards flagged.
+// markFlagged 将 threads 中被 safeguards 标记的聊天打上标记。
 func markFlagged(flags auth.ChatFlags, threads ...*domain.Thread) {
 	for _, t := range threads {
 		t.Flagged = t.Flagged || flags[t.ID]

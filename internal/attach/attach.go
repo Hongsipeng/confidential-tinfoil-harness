@@ -32,6 +32,7 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// Service 处理 chat 中除文本之外的附件：上传、文档、图像与语音。
 type Service struct {
 	Auth   *auth.Authenticator
 	Models *inference.Models
@@ -42,12 +43,14 @@ type Service struct {
 
 // Text is read whole into a chat, so a text file may be larger than the
 // files the harness converts. No upload is read past maxTextBytes.
+// 文本会被整体读入 chat，因此文本文件可能大于 harness 转换的文件。任何上传都不会读取超过 maxTextBytes 的内容。
 const MaxUploadBytes = 33 << 20
 const maxTextBytes = 50 << 20
 const maxImagePixels = 40_000_000
 
 // An image is kept as the copy models read, no longer on either side than
 // modelImageSide, with a thumbnail no longer than thumbnailSide.
+// 图像以模型读取时的副本形式保存，任一边都不超过 modelImageSide，缩略图不超过 thumbnailSide。
 const (
 	modelImageSide = 1536
 	thumbnailSide  = 256
@@ -55,9 +58,11 @@ const (
 
 // Resizing decodes an image whole, so the images a turn sends larger than
 // the copy models read hold together no more pixels than one image may.
+// 缩放会整体解码图像，因此一个 Turn 发送的、大于模型读取副本的图像，其像素总数不得超过单张图像的上限。
 const MaxTurnResizePixels = maxImagePixels
 
 // An upload's form holds its file and a few short fields.
+// 上传的表单包含文件以及几个短字段。
 const (
 	MaxFormParts = 12
 	MaxFormField = 8 << 10
@@ -65,6 +70,7 @@ const (
 
 // UploadGroup is a kind of file uploads accept, named by extension, and the
 // largest file of that kind. Clients pick a file's group by its extension.
+// UploadGroup 是上传所接受的一类文件，按扩展名命名，并记录该类文件的大小上限。客户端根据扩展名为文件选择分组。
 type UploadGroup struct {
 	Accept       []string `json:"accept"`
 	MaxBytes     int      `json:"maxBytes"`
@@ -73,7 +79,9 @@ type UploadGroup struct {
 }
 
 var (
-	TextUploads     = UploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, kind: "document"}
+	// TextUploads 是作为文本上传的文件分组。
+	TextUploads = UploadGroup{Accept: strings.Fields(".txt .md .py .js .jsx .ts .tsx .css .json .xml .yaml .yml .toml .sh .bash .rb .java .cpp .c .h .hpp .go .rs .swift .kt .kts .r .sql .lua .pl .php .cs .csx .vb .fs .fsx .scala .dart .ex .exs .erl .hs .ml .mli .clj .cljs .groovy .gradle .m .mm .zig .nim .jl .ps1 .psm1 .bat .cmd .asm .s .proto .graphql .gql .tf .tfvars .dockerfile .makefile .cmake .tex .bib .svg .properties .lock .diff .patch .env .ini .cfg .conf .log .rtf .html .htm .xhtml .csv .tsv .qfx .qif .ofx .ifs .qbo .qbx .bai .bai2 .mt940 .sta .ics .vcf"), MaxBytes: maxTextBytes, kind: "document"}
+	// ImageUploads 是作为图像上传的文件分组。
 	ImageUploads    = UploadGroup{Accept: strings.Fields(".jpg .jpeg .png .gif .webp .bmp .tiff .tif"), MaxBytes: MaxUploadBytes, ImageMaxSide: modelImageSide, kind: "image"}
 	documentUploads = UploadGroup{Accept: strings.Fields(".pdf .docx .pptx .xlsx"), MaxBytes: MaxUploadBytes, kind: "document"}
 	audioUploads    = UploadGroup{Accept: strings.Fields(".mp3 .wav .ogg .m4a .aac .flac .webm .wma"), MaxBytes: MaxUploadBytes, kind: "audio"}
@@ -81,6 +89,7 @@ var (
 
 // A message attaches files of any group; a project keeps extracted text,
 // image descriptions, and audio transcripts.
+// 消息可附加任意分组的文件；project 保存提取出的文本、图像描述与音频转录。
 var (
 	AttachmentGroups      = []*UploadGroup{&TextUploads, &ImageUploads, &documentUploads, &audioUploads}
 	projectDocumentGroups = []*UploadGroup{&TextUploads, &documentUploads, &ImageUploads, &audioUploads}
@@ -89,6 +98,7 @@ var (
 // A file of no type uploads take is read as text, as the web client read
 // it, when its first textSniffBytes hold no NUL byte and at most
 // maxInvalidTextPercent of their characters are not UTF-8.
+// 对于上传不接受类型的文件，当其前 textSniffBytes 个字节不含 NUL 字节、且非 UTF-8 字符不超过 maxInvalidTextPercent 时，会像 Web 客户端那样按文本读取。
 const (
 	textSniffBytes        = 8192
 	maxInvalidTextPercent = 5
@@ -116,6 +126,7 @@ func (g *UploadGroup) accepts(filename string) bool {
 }
 
 // attachmentGroup is the group a message's file belongs to, if any.
+// attachmentGroup 返回消息中文件所属的分组（如果存在）。
 func attachmentGroup(filename string) *UploadGroup {
 	for _, g := range AttachmentGroups {
 		if g.accepts(filename) {
@@ -128,6 +139,7 @@ func attachmentGroup(filename string) *UploadGroup {
 // maxContent is the most an upload of the group holds: a text file's text
 // and an image's bytes are the file, and a converted file's content is what
 // the converter answers with.
+// maxContent 是该分组上传内容的上限：文本文件的文本和图像的字节就是文件本身，转换后文件的内容则以转换器返回的为准。
 func (g *UploadGroup) maxContent() int {
 	if g == &TextUploads || g == &ImageUploads {
 		return g.MaxBytes
@@ -141,6 +153,7 @@ func (g *UploadGroup) maxContent() int {
 // each ended at a pause, since a long recording can keep the speech model
 // talking past its deadline. A client that sends dictation as one recording
 // stops it after dictationMaxSeconds.
+// 客户端 composer 在内容到达 harness 之前的行为：超过 pasteAsFileChars 的粘贴会变成文本文件；听写会分成约 dictationSegmentSeconds 一段的录音去转写，每段在停顿处结束，因为过长的录音会让 speech 模型超出其期限。将听写作为单段录音发送的客户端会在 dictationMaxSeconds 后停止。
 const (
 	pasteAsFileChars        = 3000
 	dictationMaxSeconds     = 10 * 60
@@ -149,6 +162,7 @@ const (
 
 // ComposerView is what a client's composer accepts: the groups of files
 // uploads take, for a message and for a project.
+// ComposerView 是客户端 composer 所接受的内容：消息和 project 各自可上传的文件分组。
 type ComposerView struct {
 	Attachments             []UploadGroup `json:"attachments"`
 	ProjectDocuments        []UploadGroup `json:"projectDocuments"`
@@ -157,6 +171,7 @@ type ComposerView struct {
 	DictationSegmentSeconds int           `json:"dictationSegmentSeconds"`
 }
 
+// Composer 返回客户端 composer 用于接受上传的配置视图。
 func Composer() ComposerView {
 	shown := func(groups []*UploadGroup) []UploadGroup {
 		out := []UploadGroup{}
@@ -174,6 +189,7 @@ func Composer() ComposerView {
 	}
 }
 
+// HandleUpload 处理附件上传的 HTTP 请求。
 func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	p, err := at.Auth.Authenticate(r, r.URL.Path == "/v1/transcriptions" || r.URL.Path == "/v1/attachments/upload")
 	if err != nil {
@@ -272,6 +288,7 @@ func (at *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	// An upload is only converted. Its client sends the descriptor back with
 	// the turn that attaches it, and that turn stores it with the chat.
+	// 上传只会被转换。客户端在附加它的那个 Turn 中把 descriptor 一并发回，由该 Turn 将其存入 chat。
 	if r.URL.Path == "/v1/attachments/upload" {
 		descriptor.ID = "att_" + api.Token()
 		api.Respond(w, struct {
@@ -311,9 +328,11 @@ var errUnsupportedType = api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported fil
 // fitsUpload refuses a descriptor no upload makes: one of a file uploads do
 // not take, an image without its bytes, or holding more than an upload of
 // its file's group. A turn names an image its chat holds by id alone.
+// fitsUpload 拒绝无法由上传产生的 descriptor：上传不接受类型的文件、缺少字节的图像，或内容超过其文件分组上传上限。一个 Turn 仅用 id 指代其 chat 已持有的图像。
 func (d *Sent) fitsUpload() error {
 	group := attachmentGroup(d.FileName)
 	// A file of no type uploads take was read as text.
+	// 上传不接受类型的文件会被当作文本读取。
 	if group == nil && d.Kind == TextUploads.kind && d.Base64 == "" && len(d.Pages) == 0 {
 		group = &TextUploads
 	}
@@ -336,6 +355,7 @@ func (d *Sent) fitsUpload() error {
 // stored is the form of an attachment a turn sends whole that its chat
 // stores: an upload's descriptor, and an image's bytes no larger than the
 // copy an upload makes for models.
+// stored 是一个 Turn 完整发送、并由其 chat 存储的 attachment 形态：上传的 descriptor，以及不大于上传为模型生成的副本的图像字节。
 func (d *Sent) stored() (domain.Attachment, error) {
 	a := domain.Attachment{ID: d.ID, Kind: d.Kind, FileName: d.FileName, MimeType: d.MimeType, Size: d.Size, Thumbnail: domain.ValueOr(d.Thumbnail, ""), TextContent: d.TextContent, Description: d.Description, Pages: d.Pages, Base64: d.Base64}
 	if !a.IsImage() {
@@ -351,6 +371,7 @@ func (d *Sent) stored() (domain.Attachment, error) {
 		return domain.Attachment{}, api.Err(415, "ATTACHMENT_UNSUPPORTED", "The image could not be decoded")
 	}
 	// An image within the bounds, as the copy an upload makes is, is kept.
+	// 在界限内的图像（即上传生成的副本）会被原样保留。
 	if max(cfg.Width, cfg.Height) <= modelImageSide {
 		return a, nil
 	}
@@ -364,6 +385,7 @@ func (d *Sent) stored() (domain.Attachment, error) {
 
 // ResizePixels is how many pixels storing the attachment decodes to resize
 // it: an image's, when it is larger than the copy models read.
+// ResizePixels 是存储该 attachment 时为缩放而解码的像素数：当图像大于模型读取的副本时，即该图像的像素数。
 func (d *Sent) ResizePixels() int64 {
 	if d.Kind != "image" || d.Base64 == "" {
 		return 0
@@ -375,6 +397,7 @@ func (d *Sent) ResizePixels() int64 {
 	return int64(cfg.Width) * int64(cfg.Height)
 }
 
+// Preprocess 将上传的文件预处理为 attachment descriptor。
 func (at *Service) Preprocess(ctx context.Context, filename string, data []byte) (domain.Attachment, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	group := attachmentGroup(filename)
@@ -395,6 +418,7 @@ func (at *Service) Preprocess(ctx context.Context, filename string, data []byte)
 		}
 		// As the web client read text, what is not UTF-8 reads as U+FFFD,
 		// which can make the text longer than the file.
+		// 与 Web 客户端读取文本的方式一致，非 UTF-8 内容会读成 U+FFFD，这可能使文本比文件更长。
 		descriptor.TextContent = strings.ToValidUTF8(string(data), string(utf8.RuneError))
 		if len(descriptor.TextContent) > group.maxContent() {
 			return domain.Attachment{}, api.Err(413, "ATTACHMENT_TOO_LARGE", "The file exceeds the size limit for its type")
@@ -417,6 +441,7 @@ func (at *Service) Preprocess(ctx context.Context, filename string, data []byte)
 			return domain.Attachment{}, err
 		}
 		// The converter answers with the document, or with it nested.
+		// 转换器返回文档本身，或嵌套在其中的文档。
 		type conversion struct {
 			Markdown string                `json:"md_content"`
 			Pages    []domain.DocumentPage `json:"pages"`
@@ -446,6 +471,8 @@ func (at *Service) Preprocess(ctx context.Context, filename string, data []byte)
 	}
 	return descriptor, nil
 }
+
+// ResizeImage 将图像缩放为模型副本与缩略图两种尺寸。
 func ResizeImage(data []byte) ([]byte, []byte, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || cfg.Width < 1 || cfg.Height < 1 || int64(cfg.Width)*int64(cfg.Height) > maxImagePixels {
@@ -483,8 +510,10 @@ func ResizeImage(data []byte) ([]byte, []byte, error) {
 
 // The document service queues conversions itself and answers a full queue
 // with a delay, which a conversion waits out while it fits the deadline.
+// 文档服务自行排队处理转换，队列已满时会以延迟回应；转换会在不超出 deadline 的前提下等待该延迟。
 var ConversionDeadline = 10 * time.Minute
 
+// Convert 调用文档服务把上传的文件转换为 Markdown。
 func (at *Service) Convert(ctx context.Context, filename string, data []byte) ([]byte, error) {
 	router := at.Models.Services["router"]
 	if router == nil {
@@ -511,6 +540,7 @@ func (at *Service) Convert(ctx context.Context, filename string, data []byte) ([
 
 // capacityDelay is how long a capacity rejection asks to wait, or zero when the
 // refusal is final. An exhausted quota needs the user rather than a retry.
+// capacityDelay 是容量不足的拒绝所要求的等待时长；若拒绝是最终性的则返回 0。quota 耗尽需要用户处理，而非重试。
 func capacityDelay(err error) time.Duration {
 	var e *api.Error
 	if !errors.As(err, &e) || e.Code == "QUOTA_EXHAUSTED" || e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable {
@@ -566,6 +596,7 @@ func multipartCall(ctx context.Context, service *inference.Service, path, fileFi
 // A recording not transcribed by TranscriptionDeadline fails, so a speech
 // model that keeps talking does not hold its caller. A dictation segment
 // transcribes in seconds.
+// 未在 TranscriptionDeadline 内完成转写的录音会失败，这样持续输出的 speech 模型不会一直占用调用方。一段听写录音以秒为单位完成转写。
 var TranscriptionDeadline = 2 * time.Minute
 
 func (at *Service) transcribe(ctx context.Context, filename string, data []byte) (string, error) {
@@ -576,6 +607,7 @@ func (at *Service) transcribe(ctx context.Context, filename string, data []byte)
 		return "", api.Err(415, "ATTACHMENT_UNSUPPORTED", "Unsupported recording type")
 	}
 	// The router reads the model from the form, as the web client's SDK sends it.
+	// router 从表单中读取模型，与 Web 客户端 SDK 的发送方式一致。
 	router := at.Models.Services["router"]
 	if router == nil {
 		return "", api.Err(503, "TOOL_UNAVAILABLE", "Transcription is unavailable")
@@ -599,6 +631,7 @@ func (at *Service) transcribe(ctx context.Context, filename string, data []byte)
 }
 
 // attachment finds an attachment of the named thread for its client to download.
+// attachment 查找指定 thread 中的某个 attachment，供其客户端下载。
 func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.ContentKey, id, threadID string) (*domain.Attachment, []byte, error) {
 	if p.Anonymous {
 		return nil, nil, api.Err(404, "THREAD_NOT_FOUND", "The attachment was not found")
@@ -622,6 +655,7 @@ func (at *Service) attachment(ctx context.Context, p *auth.Principal, key auth.C
 }
 
 // Bytes is an attachment's content: the copy it carries, or its blob.
+// Bytes 返回 attachment 的内容：它自身携带的副本，或其 blob。
 func (at *Service) Bytes(ctx context.Context, p *auth.Principal, a *domain.Attachment) ([]byte, error) {
 	if a.Base64 != "" {
 		return base64.StdEncoding.DecodeString(a.Base64)
@@ -630,8 +664,10 @@ func (at *Service) Bytes(ctx context.Context, p *auth.Principal, a *domain.Attac
 }
 
 // OpaqueContentType is the type every downloaded attachment is sent as.
+// OpaqueContentType 是所有下载的 attachment 响应所使用的 Content-Type。
 const OpaqueContentType = "application/octet-stream"
 
+// HandleAttachmentGet 处理附件下载的 HTTP 请求。
 func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	p, err := at.Auth.Caller(r, true)
 	if err != nil {
@@ -667,6 +703,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A share's client names the attachment and the key its link carries.
+		// 分享的客户端用链接所携带的 key 来指代 attachment。
 		descriptor = &domain.Attachment{ID: in.ID, EncryptionKey: in.AttKey, Kind: cmp.Or(in.Kind, in.Type), FileName: in.FileName, MimeType: in.MimeType, TextContent: in.TextContent, Pages: in.Pages}
 		data, err = at.Bytes(r.Context(), &auth.Principal{Anonymous: true}, descriptor)
 	} else {
@@ -687,6 +724,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	defer clear(data)
 	if documentRequest(descriptor, data) {
 		// A stored document keeps its extracted content, not the uploaded file.
+		// 已存储的文档保留其提取出的内容，而非上传的原始文件。
 		content := Content(descriptor)
 		if content.empty() {
 			if content, err = DecodeDocument(data); err != nil {
@@ -699,6 +737,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// EHBP seals the body but not the headers, so the response names neither
 	// the file nor its type; the client reads both from the chat it holds.
+	// EHBP 会封装响应体但不会封装响应头，因此响应中既不标明文件名也不标明其类型；客户端从它所持有的 chat 中读取这两者。
 	w.Header().Set("Content-Type", OpaqueContentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -707,6 +746,7 @@ func (at *Service) HandleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 
 // A shared chat's client may not say what an attachment is. A document blob is
 // JSON, and no supported image format starts with a brace.
+// 共享 chat 的客户端可能不会说明 attachment 的类型。文档 blob 是 JSON，而任何受支持的图像格式都不以花括号开头。
 func documentRequest(a *domain.Attachment, data []byte) bool {
 	switch a.Kind {
 	case "image":
@@ -720,6 +760,7 @@ func documentRequest(a *domain.Attachment, data []byte) bool {
 
 // OfTurn resolves the attachments a turn names: an upload sent
 // whole, or by id one the thread already holds, as an edit sends it.
+// OfTurn 解析一个 Turn 所指的 attachments：完整发送的上传，或以 id 指代该 thread 已持有的（编辑消息时的发送方式）。
 func OfTurn(attachments []Sent, t *domain.Thread) ([]domain.Attachment, error) {
 	result := []domain.Attachment{}
 	for i := range attachments {
@@ -743,6 +784,7 @@ func OfTurn(attachments []Sent, t *domain.Thread) ([]domain.Attachment, error) {
 
 // A local transcript may omit older images' bytes to stay small. The model
 // then reads such an image through its description, or not at all.
+// 本地 transcript 为保持体积可能省略较旧图像的字节。此时模型通过其描述来读取该图像，或干脆不读。
 func (at *Service) HydrateContext(ctx context.Context, p *auth.Principal, t *domain.Thread, keyless bool) error {
 	vision := at.Models.Catalog.Get().Vision(t.Model)
 	return t.EachAttachment(func(a *domain.Attachment) error {
@@ -750,6 +792,7 @@ func (at *Service) HydrateContext(ctx context.Context, p *auth.Principal, t *dom
 			return nil
 		}
 		// Without its bytes, only its thumbnail was kept.
+		// 没有字节时，只保留了它的缩略图。
 		if a.Base64 == "" && (keyless || a.StorageKey() == "") {
 			return nil
 		}
